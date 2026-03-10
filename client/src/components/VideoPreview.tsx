@@ -28,7 +28,9 @@ export default function VideoPreview({ baseUrl, maskUrl, state, onBufferWarmup, 
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
   const [isLooping, setIsLooping] = useState(true);
-  const [videoSize, setVideoSize] = useState({ w: 0, h: 0 });
+  // Use a ref for video dimensions to avoid stale closure in the render loop
+  const videoDimsRef = useRef({ w: 0, h: 0 });
+  const [videoSize, setVideoSize] = useState({ w: 0, h: 0 });  // for aspect ratio display only
 
   // Keep stateRef in sync without triggering re-renders
   useEffect(() => { stateRef.current = state; }, [state]);
@@ -62,10 +64,13 @@ export default function VideoPreview({ baseUrl, maskUrl, state, onBufferWarmup, 
     // Resize canvas to match video dimensions
     const vw = base.videoWidth || 640;
     const vh = base.videoHeight || 360;
-    if (vw !== videoSize.w || vh !== videoSize.h) {
-      setVideoSize({ w: vw, h: vh });
+    // Only resize (and clear history) when dimensions actually change
+    // Use a ref so this comparison is stable across RAF frames
+    if (vw !== videoDimsRef.current.w || vh !== videoDimsRef.current.h) {
+      videoDimsRef.current = { w: vw, h: vh };
+      setVideoSize({ w: vw, h: vh }); // update display aspect ratio
+      engine.resize(vw, vh);
     }
-    engine.resize(vw, vh);
 
     engine.renderFrame(base, mask && mask.readyState >= 2 ? mask : null, stateRef.current);
 
@@ -104,6 +109,8 @@ export default function VideoPreview({ baseUrl, maskUrl, state, onBufferWarmup, 
       video.src = "";
       setDuration(0);
     }
+    // Reset dims ref so resize fires on the new video's first frame
+    videoDimsRef.current = { w: 0, h: 0 };
     engineRef.current?.clearHistory();
   }, [baseUrl]);
 
