@@ -56,6 +56,12 @@ uniform int u_chromB;
 uniform float u_weightCurve[64];
 uniform int u_weightCurveLen;
 
+// Mask exclusion
+uniform bool u_excludeMask;
+uniform sampler2D u_maskTex;
+uniform vec3 u_maskExcludeColors[5];
+uniform int u_numMaskExcludeColors;
+
 // Sample a specific frame from the atlas by index (0 = most recent)
 vec4 sampleHistory(int frameIdx, vec2 uv) {
   int col = frameIdx - (frameIdx / ATLAS_COLS) * ATLAS_COLS; // frameIdx % ATLAS_COLS
@@ -112,6 +118,21 @@ float getPixelWeight(vec3 histPixel, float baseWeight) {
   return baseWeight * curveVal;
 }
 
+// Compute how much a pixel at uv is inside the mask (0=outside, 1=inside)
+float getMaskAlpha(vec2 uv) {
+  if (!u_excludeMask) return 0.0;
+  vec4 mask = texture(u_maskTex, uv);
+  float alpha = 0.0;
+  for (int i = 0; i < 5; i++) {
+    if (i >= u_numMaskExcludeColors) break;
+    float luma = dot(mask.rgb, vec3(0.3333));
+    float maskDiff = dot(abs(mask.rgb - u_maskExcludeColors[i]), vec3(1.0));
+    float maskAlpha = (1.0 - smoothstep(0.0, 1.0, maskDiff)) * smoothstep(0.15, 0.25, luma);
+    alpha = max(alpha, maskAlpha);
+  }
+  return alpha;
+}
+
 void main() {
   vec2 uv = v_texCoord;
   vec4 current = texture(u_current, uv);
@@ -166,7 +187,9 @@ void main() {
     else                        blended = blendAverage(current.rgb, accum);
   }
 
-  vec3 result = mix(current.rgb, blended, u_blendStrength);
+  // If mask exclusion is on, blend back to current in the masked region
+  float maskExclusion = getMaskAlpha(uv);
+  vec3 result = mix(mix(current.rgb, blended, u_blendStrength), current.rgb, maskExclusion);
 
   // Chromatic aberration: R samples from chromR-offset frame, B from chromB-offset frame
   float r = result.r;
@@ -175,11 +198,11 @@ void main() {
   // u_chromR and u_chromB are atlas slot indices (pre-computed by CPU)
   if (u_chromR >= 0) {
     float rSample = sampleHistory(u_chromR, uv).r;
-    r = mix(result.r, rSample, u_blendStrength * 0.7);
+    r = mix(mix(result.r, rSample, u_blendStrength * 0.7), current.r, maskExclusion);
   }
   if (u_chromB >= 0) {
     float bSample = sampleHistory(u_chromB, uv).b;
-    b = mix(result.b, bSample, u_blendStrength * 0.7);
+    b = mix(mix(result.b, bSample, u_blendStrength * 0.7), current.b, maskExclusion);
   }
 
   fragColor = vec4(r, result.g, b, current.a);

@@ -46,6 +46,9 @@ export interface FXState {
 
   // Mask colors (5 slots)
   maskColors: RGBColor[];
+
+  // When true, pixels inside the mask region are excluded from the temporal effect
+  excludeMaskFromEffect: boolean;
 }
 
 export const DEFAULT_STATE: FXState = {
@@ -57,6 +60,7 @@ export const DEFAULT_STATE: FXState = {
   blendMode: "screen",
   blendStrength: 0.6,
   chromaticSpread: 0,
+  excludeMaskFromEffect: false,
   maskColors: [
     { r: 0.0, g: 1.0, b: 0.0 },  // green screen default
     { r: 0.0, g: 0.0, b: 1.0 },

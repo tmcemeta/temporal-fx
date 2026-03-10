@@ -86,7 +86,13 @@ export class TemporalFXEngine {
       "u_blendMode", "u_blendStrength",
       "u_weightMode", "u_chromR", "u_chromB",
       "u_weightCurve", "u_weightCurveLen",
+      "u_excludeMask", "u_maskTex", "u_numMaskExcludeColors",
     ]);
+    // Register mask exclude color array uniforms
+    for (let i = 0; i < 5; i++) {
+      this.compositeProgram.uniforms[`u_maskExcludeColors[${i}]`] =
+        gl.getUniformLocation(this.compositeProgram.program, `u_maskExcludeColors[${i}]`);
+    }
 
     this.overlayProgram = this.createProgram(VERTEX_SHADER, OVERLAY_SHADER, [
       "u_fxOutput", "u_baseVideo", "u_maskVideo",
@@ -344,6 +350,18 @@ export class TemporalFXEngine {
       state.chromaticSpread > 0 ? chromRSlot : -1);
     gl.uniform1i(this.compositeProgram.uniforms["u_chromB"],
       state.chromaticSpread > 0 ? chromBSlot : -1);
+
+    // Mask exclusion uniforms
+    gl.uniform1i(this.compositeProgram.uniforms["u_excludeMask"],
+      state.excludeMaskFromEffect && maskVideo ? 1 : 0);
+    gl.activeTexture(gl.TEXTURE3);
+    gl.bindTexture(gl.TEXTURE_2D, this.maskFrameTexture);
+    gl.uniform1i(this.compositeProgram.uniforms["u_maskTex"], 3);
+    gl.uniform1i(this.compositeProgram.uniforms["u_numMaskExcludeColors"], 5);
+    for (let i = 0; i < 5; i++) {
+      const c = state.maskColors[i];
+      gl.uniform3f(this.compositeProgram.uniforms[`u_maskExcludeColors[${i}]`], c.r, c.g, c.b);
+    }
 
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
 
