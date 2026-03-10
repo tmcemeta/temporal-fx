@@ -7,11 +7,12 @@
 //   - Width:  videoWidth  * ATLAS_COLS
 //   - Height: videoHeight * ATLAS_ROWS
 //   - Frame f occupies tile (col = f % ATLAS_COLS, row = f / ATLAS_COLS)
-//   - The atlas holds up to MAX_HISTORY = ATLAS_COLS * ATLAS_ROWS frames
 //
-// Ring buffer: historyHead points to the NEXT slot to write.
-// Frame 0 (most recent) = slot (historyHead - 1 + MAX_HISTORY) % MAX_HISTORY
-// Frame i (i-th most recent) = slot (historyHead - 1 - i + MAX_HISTORY) % MAX_HISTORY
+// IMPORTANT: All textures used as FBO attachments (baseFrameTexture,
+// compositeTexture, prevFrameTexture, atlases) MUST be pre-allocated with
+// explicit dimensions via texImage2D(null) before copyTexSubImage2D is called.
+// Using texImage2D(video) alone does NOT guarantee the texture has storage
+// allocated in a way that is safe for FBO attachment.
 
 import type { FXState } from "./types";
 import {
@@ -37,27 +38,26 @@ export class TemporalFXEngine {
   private compositeProgram!: Program;
   private overlayProgram!: Program;
 
-  // Geometry buffer
   private quadBuffer!: WebGLBuffer;
 
-  // History ring buffer metadata
-  private historyHead = 0;   // next slot to write
-  public historyFilled = 0;  // how many slots contain valid data
+  // History ring buffer
+  private historyHead = 0;
+  public historyFilled = 0;
 
-  // Texture atlas: one atlas for original frames, one for processed frames
+  // Texture atlas (one for original frames, one for processed)
   private atlasOriginal!: WebGLTexture;
   private atlasProcessed!: WebGLTexture;
 
-  // Off-screen FBOs
+  // Off-screen composite FBO
   private compositeFBO!: WebGLFramebuffer;
   private compositeTexture!: WebGLTexture;
-  private prevFrameTexture!: WebGLTexture;
 
-  // Current frame textures
+  // Per-frame textures (pre-allocated to video dimensions)
   private baseFrameTexture!: WebGLTexture;
   private maskFrameTexture!: WebGLTexture;
+  private prevFrameTexture!: WebGLTexture;
 
-  // Copy FBO (reused)
+  // Reusable FBO for copy operations
   private copyFBO!: WebGLFramebuffer;
 
   private width = 0;
@@ -92,41 +92,41 @@ export class TemporalFXEngine {
       "u_fxOutput", "u_baseVideo", "u_maskVideo",
       "u_hasMask", "u_maskColors", "u_numMaskColors",
     ]);
-
-    // Register mask color array uniforms
     for (let i = 0; i < 5; i++) {
       this.overlayProgram.uniforms[`u_maskColors[${i}]`] =
         gl.getUniformLocation(this.overlayProgram.program, `u_maskColors[${i}]`);
     }
 
     this.quadBuffer = this.createQuadBuffer();
-    this.baseFrameTexture = this.createTexture();
-    this.maskFrameTexture = this.createTexture();
-    this.prevFrameTexture = this.createTexture();
     this.copyFBO = gl.createFramebuffer()!;
+
+    // Create textures (storage allocated later in resize())
+    this.baseFrameTexture = this.makeTexture(gl.LINEAR);
+    this.maskFrameTexture = this.makeTexture(gl.LINEAR);
+    this.prevFrameTexture = this.makeTexture(gl.LINEAR);
+    this.compositeTexture = this.makeTexture(gl.LINEAR);
+    this.atlasOriginal = this.makeTexture(gl.NEAREST);
+    this.atlasProcessed = this.makeTexture(gl.NEAREST);
+
+    this.compositeFBO = gl.createFramebuffer()!;
   }
 
-  private createProgram(
-    vertSrc: string,
-    fragSrc: string,
-    uniformNames: string[]
-  ): Program {
+  private createProgram(vertSrc: string, fragSrc: string, uniformNames: string[]): Program {
     const gl = this.gl;
 
-    const vert = gl.createShader(gl.VERTEX_SHADER)!;
-    gl.shaderSource(vert, vertSrc);
-    gl.compileShader(vert);
-    if (!gl.getShaderParameter(vert, gl.COMPILE_STATUS)) {
-      throw new Error("Vertex shader error: " + gl.getShaderInfoLog(vert));
-    }
+    const compileShader = (type: number, src: string): WebGLShader => {
+      const s = gl.createShader(type)!;
+      gl.shaderSource(s, src);
+      gl.compileShader(s);
+      if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) {
+        const label = type === gl.VERTEX_SHADER ? "Vertex" : "Fragment";
+        throw new Error(`${label} shader error: ${gl.getShaderInfoLog(s)}`);
+      }
+      return s;
+    };
 
-    const frag = gl.createShader(gl.FRAGMENT_SHADER)!;
-    gl.shaderSource(frag, fragSrc);
-    gl.compileShader(frag);
-    if (!gl.getShaderParameter(frag, gl.COMPILE_STATUS)) {
-      throw new Error("Fragment shader error: " + gl.getShaderInfoLog(frag));
-    }
-
+    const vert = compileShader(gl.VERTEX_SHADER, vertSrc);
+    const frag = compileShader(gl.FRAGMENT_SHADER, fragSrc);
     const program = gl.createProgram()!;
     gl.attachShader(program, vert);
     gl.attachShader(program, frag);
@@ -150,6 +150,23 @@ export class TemporalFXEngine {
       },
       uniforms,
     };
+  }
+
+  private makeTexture(filter: number): WebGLTexture {
+    const gl = this.gl;
+    const tex = gl.createTexture()!;
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, filter);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, filter);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    return tex;
+  }
+
+  private allocTexture(tex: WebGLTexture, w: number, h: number) {
+    const gl = this.gl;
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, w, h, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
   }
 
   private createQuadBuffer(): WebGLBuffer {
@@ -178,28 +195,6 @@ export class TemporalFXEngine {
     }
   }
 
-  private createTexture(): WebGLTexture {
-    const gl = this.gl;
-    const tex = gl.createTexture()!;
-    gl.bindTexture(gl.TEXTURE_2D, tex);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-    return tex;
-  }
-
-  private createAtlasTexture(atlasW: number, atlasH: number): WebGLTexture {
-    const gl = this.gl;
-    const tex = this.createTexture();
-    gl.bindTexture(gl.TEXTURE_2D, tex);
-    // Use NEAREST for atlas to avoid bleeding between tiles
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
-    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
-    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, atlasW, atlasH, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
-    return tex;
-  }
-
   resize(width: number, height: number) {
     if (this.width === width && this.height === height) return;
     const gl = this.gl;
@@ -211,28 +206,18 @@ export class TemporalFXEngine {
     const atlasW = width * ATLAS_COLS;
     const atlasH = height * ATLAS_ROWS;
 
-    // Recreate atlas textures
-    if (this.atlasOriginal) gl.deleteTexture(this.atlasOriginal);
-    if (this.atlasProcessed) gl.deleteTexture(this.atlasProcessed);
-    this.atlasOriginal = this.createAtlasTexture(atlasW, atlasH);
-    this.atlasProcessed = this.createAtlasTexture(atlasW, atlasH);
+    // Pre-allocate all textures with explicit dimensions
+    this.allocTexture(this.baseFrameTexture, width, height);
+    this.allocTexture(this.maskFrameTexture, width, height);
+    this.allocTexture(this.prevFrameTexture, width, height);
+    this.allocTexture(this.compositeTexture, width, height);
+    this.allocTexture(this.atlasOriginal, atlasW, atlasH);
+    this.allocTexture(this.atlasProcessed, atlasW, atlasH);
 
-    // Recreate composite FBO
-    if (this.compositeFBO) {
-      gl.deleteFramebuffer(this.compositeFBO);
-      gl.deleteTexture(this.compositeTexture);
-    }
-    this.compositeTexture = this.createTexture();
-    gl.bindTexture(gl.TEXTURE_2D, this.compositeTexture);
-    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, width, height, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
-    this.compositeFBO = gl.createFramebuffer()!;
+    // Attach compositeTexture to compositeFBO
     gl.bindFramebuffer(gl.FRAMEBUFFER, this.compositeFBO);
     gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, this.compositeTexture, 0);
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
-
-    // Resize prev frame texture
-    gl.bindTexture(gl.TEXTURE_2D, this.prevFrameTexture);
-    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, width, height, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
 
     this.clearHistory();
   }
@@ -242,15 +227,20 @@ export class TemporalFXEngine {
     this.historyFilled = 0;
   }
 
+  /**
+   * Upload a video frame into a pre-allocated texture using texSubImage2D.
+   * Requires the texture to already have storage allocated (via allocTexture).
+   */
   private uploadVideoFrame(tex: WebGLTexture, video: HTMLVideoElement) {
     const gl = this.gl;
     gl.bindTexture(gl.TEXTURE_2D, tex);
-    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE, video);
+    // texSubImage2D is safe as long as the texture was pre-allocated
+    gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, gl.RGBA, gl.UNSIGNED_BYTE, video);
   }
 
   /**
-   * Copy a texture into a specific tile of the atlas.
-   * tile = slot index (0..MAX_HISTORY-1)
+   * Copy a texture into a specific tile of the atlas using copyTexSubImage2D.
+   * The source texture must be pre-allocated and attached to copyFBO.
    */
   private copyToAtlasTile(srcTex: WebGLTexture, atlasTex: WebGLTexture, slot: number) {
     const gl = this.gl;
@@ -259,20 +249,21 @@ export class TemporalFXEngine {
     const xOffset = col * this.width;
     const yOffset = row * this.height;
 
-    // Read from srcTex via copyFBO
     gl.bindFramebuffer(gl.READ_FRAMEBUFFER, this.copyFBO);
     gl.framebufferTexture2D(gl.READ_FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, srcTex, 0);
 
-    // Write into atlas at tile position
+    // Verify FBO is complete before copying
+    const status = gl.checkFramebufferStatus(gl.READ_FRAMEBUFFER);
+    if (status !== gl.FRAMEBUFFER_COMPLETE) {
+      gl.bindFramebuffer(gl.READ_FRAMEBUFFER, null);
+      return; // Skip silently — can happen on first frame before textures are ready
+    }
+
     gl.bindTexture(gl.TEXTURE_2D, atlasTex);
     gl.copyTexSubImage2D(gl.TEXTURE_2D, 0, xOffset, yOffset, 0, 0, this.width, this.height);
-
     gl.bindFramebuffer(gl.READ_FRAMEBUFFER, null);
   }
 
-  /**
-   * Render one frame of the full pipeline.
-   */
   renderFrame(
     baseVideo: HTMLVideoElement,
     maskVideo: HTMLVideoElement | null,
@@ -281,23 +272,19 @@ export class TemporalFXEngine {
     const gl = this.gl;
     if (!this.width || !this.height) return;
 
-    // 1. Upload current base frame to texture
-    this.uploadVideoFrame(this.baseFrameTexture, baseVideo);
-    if (maskVideo) this.uploadVideoFrame(this.maskFrameTexture, maskVideo);
+    // Guard: video must have decoded at least one frame
+    if (baseVideo.readyState < 2) return;
 
-    // 2. Build history weight array
+    // 1. Upload current base frame
+    this.uploadVideoFrame(this.baseFrameTexture, baseVideo);
+    if (maskVideo && maskVideo.readyState >= 2) {
+      this.uploadVideoFrame(this.maskFrameTexture, maskVideo);
+    }
+
+    // 2. Build slot-indexed weight array
     const depth = Math.min(state.historyDepth, this.historyFilled);
     const weightLUT = buildWeightLUT(state.historyCurve, Math.max(depth, 1));
 
-    // Map slot indices: frame 0 = most recent = (historyHead-1), frame i = (historyHead-1-i)
-    // The atlas stores slots 0..MAX_HISTORY-1 in fixed tile positions.
-    // We need to tell the shader which atlas tile corresponds to history frame i.
-    // We do this by building a remapping: for each history frame index i (0=most recent),
-    // compute its slot in the ring buffer, then pass that as the atlas tile index.
-    // The shader's sampleHistory(i, uv) uses i directly as the atlas tile index,
-    // so we pre-sort the weight array to match atlas tile order.
-
-    // Build weight array indexed by atlas slot (not by recency)
     const slotWeights = new Float32Array(MAX_HISTORY);
     for (let i = 0; i < depth; i++) {
       const slot = ((this.historyHead - 1 - i) % MAX_HISTORY + MAX_HISTORY) % MAX_HISTORY;
@@ -306,25 +293,25 @@ export class TemporalFXEngine {
       slotWeights[slot] = weightLUT[wIdx];
     }
 
-    // Chromatic spread: find atlas slots for chromR and chromB offsets
+    // Chromatic spread: compute atlas slots for R and B offsets
+    const chromROffset = Math.min(Math.round(state.chromaticSpread), Math.max(depth - 1, 0));
+    const chromBOffset = Math.min(Math.round(state.chromaticSpread * 2), Math.max(depth - 1, 0));
     const chromRSlot = depth > 0
-      ? ((this.historyHead - 1 - Math.min(Math.round(state.chromaticSpread), depth - 1)) % MAX_HISTORY + MAX_HISTORY) % MAX_HISTORY
-      : 0;
+      ? ((this.historyHead - 1 - chromROffset) % MAX_HISTORY + MAX_HISTORY) % MAX_HISTORY
+      : -1;
     const chromBSlot = depth > 0
-      ? ((this.historyHead - 1 - Math.min(Math.round(state.chromaticSpread * 2), depth - 1)) % MAX_HISTORY + MAX_HISTORY) % MAX_HISTORY
-      : 0;
+      ? ((this.historyHead - 1 - chromBOffset) % MAX_HISTORY + MAX_HISTORY) % MAX_HISTORY
+      : -1;
 
-    // Choose atlas: original or processed based on feedbackMix
     const useProcessed = state.feedbackMix >= 0.5;
     const histAtlas = useProcessed ? this.atlasProcessed : this.atlasOriginal;
 
-    // 3. Composite pass
+    // 3. Composite pass (into compositeFBO)
     gl.bindFramebuffer(gl.FRAMEBUFFER, this.compositeFBO);
     gl.viewport(0, 0, this.width, this.height);
     gl.useProgram(this.compositeProgram.program);
     this.bindQuad(this.compositeProgram);
 
-    // Bind textures
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D, this.baseFrameTexture);
     gl.uniform1i(this.compositeProgram.uniforms["u_current"], 0);
@@ -337,18 +324,17 @@ export class TemporalFXEngine {
     gl.bindTexture(gl.TEXTURE_2D, this.prevFrameTexture);
     gl.uniform1i(this.compositeProgram.uniforms["u_prevFrame"], 2);
 
-    // Uniforms
     gl.uniform1fv(this.compositeProgram.uniforms["u_histWeights"], slotWeights);
-    gl.uniform1i(this.compositeProgram.uniforms["u_numHistory"], MAX_HISTORY); // shader iterates all slots
+    gl.uniform1i(this.compositeProgram.uniforms["u_numHistory"], MAX_HISTORY);
 
     const blendModeIndex = ["screen", "add", "multiply", "overlay", "difference", "average"]
       .indexOf(state.blendMode);
-    gl.uniform1i(this.compositeProgram.uniforms["u_blendMode"], blendModeIndex);
+    gl.uniform1i(this.compositeProgram.uniforms["u_blendMode"], Math.max(0, blendModeIndex));
     gl.uniform1f(this.compositeProgram.uniforms["u_blendStrength"], state.blendStrength);
 
     const weightModeIndex = ["uniform", "luminance", "darkness", "motion"]
       .indexOf(state.pixelWeightMode);
-    gl.uniform1i(this.compositeProgram.uniforms["u_weightMode"], weightModeIndex);
+    gl.uniform1i(this.compositeProgram.uniforms["u_weightMode"], Math.max(0, weightModeIndex));
 
     const weightCurveLUT = buildWeightLUT(state.pixelWeightCurve, 64);
     gl.uniform1fv(this.compositeProgram.uniforms["u_weightCurve"], weightCurveLUT);
@@ -361,7 +347,7 @@ export class TemporalFXEngine {
 
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
 
-    // 4. Overlay pass: composite subject over FX background
+    // 4. Overlay pass (to canvas)
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     gl.viewport(0, 0, this.width, this.height);
     gl.useProgram(this.overlayProgram.program);
@@ -380,7 +366,6 @@ export class TemporalFXEngine {
     gl.uniform1i(this.overlayProgram.uniforms["u_maskVideo"], 2);
 
     gl.uniform1i(this.overlayProgram.uniforms["u_hasMask"], maskVideo ? 1 : 0);
-
     for (let i = 0; i < 5; i++) {
       const c = state.maskColors[i];
       gl.uniform3f(this.overlayProgram.uniforms[`u_maskColors[${i}]`], c.r, c.g, c.b);
@@ -394,11 +379,14 @@ export class TemporalFXEngine {
     this.copyToAtlasTile(this.baseFrameTexture, this.atlasOriginal, slot);
     this.copyToAtlasTile(this.compositeTexture, this.atlasProcessed, slot);
 
-    // Copy base frame to prevFrame for next frame's motion detection
+    // Copy base frame → prevFrameTexture for next frame's motion detection
     gl.bindFramebuffer(gl.READ_FRAMEBUFFER, this.copyFBO);
     gl.framebufferTexture2D(gl.READ_FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, this.baseFrameTexture, 0);
-    gl.bindTexture(gl.TEXTURE_2D, this.prevFrameTexture);
-    gl.copyTexSubImage2D(gl.TEXTURE_2D, 0, 0, 0, 0, 0, this.width, this.height);
+    const prevStatus = gl.checkFramebufferStatus(gl.READ_FRAMEBUFFER);
+    if (prevStatus === gl.FRAMEBUFFER_COMPLETE) {
+      gl.bindTexture(gl.TEXTURE_2D, this.prevFrameTexture);
+      gl.copyTexSubImage2D(gl.TEXTURE_2D, 0, 0, 0, 0, 0, this.width, this.height);
+    }
     gl.bindFramebuffer(gl.READ_FRAMEBUFFER, null);
 
     this.historyHead = (this.historyHead + 1) % MAX_HISTORY;
