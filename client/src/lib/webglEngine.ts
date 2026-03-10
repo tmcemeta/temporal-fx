@@ -96,7 +96,7 @@ export class TemporalFXEngine {
 
     this.overlayProgram = this.createProgram(VERTEX_SHADER, OVERLAY_SHADER, [
       "u_fxOutput", "u_baseVideo", "u_maskVideo",
-      "u_hasMask", "u_maskColors", "u_numMaskColors",
+      "u_hasMask", "u_maskColors", "u_numMaskColors", "u_debugView",
     ]);
     for (let i = 0; i < 5; i++) {
       this.overlayProgram.uniforms[`u_maskColors[${i}]`] =
@@ -351,13 +351,16 @@ export class TemporalFXEngine {
     gl.uniform1i(this.compositeProgram.uniforms["u_chromB"],
       state.chromaticSpread > 0 ? chromBSlot : -1);
 
+    // Active mask count (shared by composite exclusion and overlay passes)
+    const activeMaskCount = Math.min(state.maskCount ?? 1, 5);
+
     // Mask exclusion uniforms
     gl.uniform1i(this.compositeProgram.uniforms["u_excludeMask"],
       state.excludeMaskFromEffect && maskVideo ? 1 : 0);
     gl.activeTexture(gl.TEXTURE3);
     gl.bindTexture(gl.TEXTURE_2D, this.maskFrameTexture);
     gl.uniform1i(this.compositeProgram.uniforms["u_maskTex"], 3);
-    gl.uniform1i(this.compositeProgram.uniforms["u_numMaskExcludeColors"], 5);
+    gl.uniform1i(this.compositeProgram.uniforms["u_numMaskExcludeColors"], activeMaskCount);
     for (let i = 0; i < 5; i++) {
       const c = state.maskColors[i];
       gl.uniform3f(this.compositeProgram.uniforms[`u_maskExcludeColors[${i}]`], c.r, c.g, c.b);
@@ -388,7 +391,8 @@ export class TemporalFXEngine {
       const c = state.maskColors[i];
       gl.uniform3f(this.overlayProgram.uniforms[`u_maskColors[${i}]`], c.r, c.g, c.b);
     }
-    gl.uniform1i(this.overlayProgram.uniforms["u_numMaskColors"], 5);
+    gl.uniform1i(this.overlayProgram.uniforms["u_numMaskColors"], activeMaskCount);
+    gl.uniform1i(this.overlayProgram.uniforms["u_debugView"], state.debugView ?? 0);
 
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
 

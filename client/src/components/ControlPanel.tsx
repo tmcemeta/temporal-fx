@@ -222,6 +222,22 @@ export default function ControlPanel({
           </button>
           {hasMask && (
             <div style={{ marginTop: "6px" }}>
+              {/* Mask count slider */}
+              <div style={{ ...ROW_STYLE, marginBottom: "8px" }}>
+                <span style={PARAM_LABEL}>Mask Colors</span>
+                <input
+                  type="range"
+                  min={1}
+                  max={5}
+                  step={1}
+                  value={state.maskCount ?? 1}
+                  onChange={e => onChange({ maskCount: parseInt(e.target.value) })}
+                  style={{ flex: 1 }}
+                />
+                <span style={VALUE_STYLE}>{state.maskCount ?? 1}</span>
+              </div>
+
+              {/* Exclude mask toggle */}
               <button
                 onClick={() => onChange({ excludeMaskFromEffect: !state.excludeMaskFromEffect })}
                 style={{
@@ -270,7 +286,7 @@ export default function ControlPanel({
                 Exclude Mask from Effect
               </button>
               <MaskColorPicker
-                colors={state.maskColors}
+                colors={state.maskColors.slice(0, state.maskCount ?? 1)}
                 onChange={(i, color) => {
                   const newColors = [...state.maskColors];
                   newColors[i] = color;
@@ -444,6 +460,37 @@ export default function ControlPanel({
           onChange={v => onChange({ chromaticSpread: v })}
           display={state.chromaticSpread === 0 ? "off" : `${state.chromaticSpread}f`}
         />
+      </div>
+
+      {/* Debug View */}
+      <div style={{ ...SECTION_STYLE, paddingTop: "10px", paddingBottom: "10px" }}>
+        <span style={LABEL_STYLE}>Debug View</span>
+        <div style={{ display: "flex", gap: "5px" }}>
+          {(["Normal", "Subject", "Background"] as const).map((label, idx) => {
+            const active = (state.debugView ?? 0) === idx;
+            return (
+              <button
+                key={label}
+                onClick={() => onChange({ debugView: idx as 0 | 1 | 2 })}
+                style={{
+                  flex: 1,
+                  background: active ? "rgba(78,205,196,0.14)" : "rgba(255,255,255,0.03)",
+                  border: `1px solid ${active ? "rgba(78,205,196,0.5)" : "rgba(255,255,255,0.1)"}`,
+                  color: active ? "#4ecdc4" : "rgba(232,232,232,0.45)",
+                  padding: "5px 4px",
+                  fontFamily: "'DM Mono', monospace",
+                  fontSize: "10px",
+                  cursor: "pointer",
+                  borderRadius: "2px",
+                  letterSpacing: "0.06em",
+                  transition: "all 0.15s",
+                }}
+              >
+                {label}
+              </button>
+            );
+          })}
+        </div>
       </div>
 
       {/* Buffer warmup indicator */}

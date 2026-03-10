@@ -223,7 +223,8 @@ uniform sampler2D u_baseVideo;
 uniform sampler2D u_maskVideo;
 uniform bool u_hasMask;
 uniform vec3 u_maskColors[MAX_COLORS];
-uniform int u_numMaskColors;
+uniform int u_numMaskColors; // active count (1..5)
+uniform int u_debugView;    // 0=normal, 1=subject only, 2=background only
 
 vec4 unpremult(vec4 color) {
   if (color.a < 0.0001) return vec4(0.0);
@@ -253,6 +254,18 @@ void main() {
 
   alpha = min(base.a, alpha);
   vec4 subject = vec4(unpremult(base).rgb * alpha, alpha);
+
+  // Debug views
+  if (u_debugView == 1) {
+    // Subject only: show subject over black
+    fragColor = vec4(subject.rgb, subject.a);
+    return;
+  }
+  if (u_debugView == 2) {
+    // Background only: show fx background, zero out subject region
+    fragColor = vec4(fxBg.rgb * (1.0 - subject.a), fxBg.a * (1.0 - subject.a));
+    return;
+  }
 
   vec3 outRgb = subject.rgb + fxBg.rgb * (1.0 - subject.a);
   float outA = subject.a + fxBg.a * (1.0 - subject.a);
