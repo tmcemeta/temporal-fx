@@ -1,18 +1,26 @@
 // TEMPORAL FX — WebGL2 Rendering Engine
-// Manages the full pipeline:
-//   1. Frame capture from video elements
-//   2. History buffer management (ring buffer of textures)
-//   3. Temporal composite pass
-//   4. Subject overlay pass
-//   5. Output to canvas
+//
+// History frames are stored in a single TEXTURE ATLAS to avoid the GLSL
+// restriction on dynamic sampler array indexing.
+//
+// Atlas layout:
+//   - Width:  videoWidth  * ATLAS_COLS
+//   - Height: videoHeight * ATLAS_ROWS
+//   - Frame f occupies tile (col = f % ATLAS_COLS, row = f / ATLAS_COLS)
+//   - The atlas holds up to MAX_HISTORY = ATLAS_COLS * ATLAS_ROWS frames
+//
+// Ring buffer: historyHead points to the NEXT slot to write.
+// Frame 0 (most recent) = slot (historyHead - 1 + MAX_HISTORY) % MAX_HISTORY
+// Frame i (i-th most recent) = slot (historyHead - 1 - i + MAX_HISTORY) % MAX_HISTORY
 
 import type { FXState } from "./types";
 import {
   VERTEX_SHADER,
   COMPOSITE_SHADER,
   OVERLAY_SHADER,
-  PASSTHROUGH_SHADER,
   MAX_HISTORY,
+  ATLAS_COLS,
+  ATLAS_ROWS,
 } from "./shaders";
 import { buildWeightLUT } from "./bezier";
 
@@ -26,25 +34,31 @@ export class TemporalFXEngine {
   private gl: WebGL2RenderingContext;
   private canvas: HTMLCanvasElement;
 
-  // Shader programs
   private compositeProgram!: Program;
   private overlayProgram!: Program;
-  private passthroughProgram!: Program;
 
-  // History ring buffer: alternates between original and processed textures
-  private historyOriginal: WebGLTexture[] = [];  // original input frames
-  private historyProcessed: WebGLTexture[] = []; // processed output frames
-  private historyHead = 0; // index of the OLDEST slot (next to write)
-  public historyFilled = 0; // how many slots are filled
+  // Geometry buffer
+  private quadBuffer!: WebGLBuffer;
 
-  // FBOs for off-screen rendering
+  // History ring buffer metadata
+  private historyHead = 0;   // next slot to write
+  public historyFilled = 0;  // how many slots contain valid data
+
+  // Texture atlas: one atlas for original frames, one for processed frames
+  private atlasOriginal!: WebGLTexture;
+  private atlasProcessed!: WebGLTexture;
+
+  // Off-screen FBOs
   private compositeFBO!: WebGLFramebuffer;
   private compositeTexture!: WebGLTexture;
-  private prevFrameTexture!: WebGLTexture; // for motion detection
+  private prevFrameTexture!: WebGLTexture;
 
-  // Temp textures for video frames
+  // Current frame textures
   private baseFrameTexture!: WebGLTexture;
   private maskFrameTexture!: WebGLTexture;
+
+  // Copy FBO (reused)
+  private copyFBO!: WebGLFramebuffer;
 
   private width = 0;
   private height = 0;
@@ -67,9 +81,10 @@ export class TemporalFXEngine {
     gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
 
     this.compositeProgram = this.createProgram(VERTEX_SHADER, COMPOSITE_SHADER, [
-      "u_current", "u_history", "u_histWeights", "u_numHistory",
-      "u_blendMode", "u_blendStrength", "u_weightMode",
-      "u_prevFrame", "u_chromR", "u_chromB",
+      "u_current", "u_historyAtlas", "u_prevFrame",
+      "u_histWeights", "u_numHistory",
+      "u_blendMode", "u_blendStrength",
+      "u_weightMode", "u_chromR", "u_chromB",
       "u_weightCurve", "u_weightCurveLen",
     ]);
 
@@ -78,13 +93,17 @@ export class TemporalFXEngine {
       "u_hasMask", "u_maskColors", "u_numMaskColors",
     ]);
 
-    this.passthroughProgram = this.createProgram(VERTEX_SHADER, PASSTHROUGH_SHADER, [
-      "u_texture",
-    ]);
+    // Register mask color array uniforms
+    for (let i = 0; i < 5; i++) {
+      this.overlayProgram.uniforms[`u_maskColors[${i}]`] =
+        gl.getUniformLocation(this.overlayProgram.program, `u_maskColors[${i}]`);
+    }
 
+    this.quadBuffer = this.createQuadBuffer();
     this.baseFrameTexture = this.createTexture();
     this.maskFrameTexture = this.createTexture();
     this.prevFrameTexture = this.createTexture();
+    this.copyFBO = gl.createFramebuffer()!;
   }
 
   private createProgram(
@@ -115,21 +134,12 @@ export class TemporalFXEngine {
     if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
       throw new Error("Program link error: " + gl.getProgramInfoLog(program));
     }
+    gl.deleteShader(vert);
+    gl.deleteShader(frag);
 
     const uniforms: Record<string, WebGLUniformLocation | null> = {};
     for (const name of uniformNames) {
       uniforms[name] = gl.getUniformLocation(program, name);
-    }
-    // Also get array uniforms for history textures and mask colors
-    for (let i = 0; i < MAX_HISTORY; i++) {
-      uniforms[`u_history[${i}]`] = gl.getUniformLocation(program, `u_history[${i}]`);
-    }
-    for (let i = 0; i < 5; i++) {
-      uniforms[`u_maskColors[${i}]`] = gl.getUniformLocation(program, `u_maskColors[${i}]`);
-    }
-    // Weight curve LUT array
-    for (let i = 0; i < 64; i++) {
-      uniforms[`u_weightCurve[${i}]`] = gl.getUniformLocation(program, `u_weightCurve[${i}]`);
     }
 
     return {
@@ -142,7 +152,31 @@ export class TemporalFXEngine {
     };
   }
 
-  private quadBuffer!: WebGLBuffer;
+  private createQuadBuffer(): WebGLBuffer {
+    const gl = this.gl;
+    const buf = gl.createBuffer()!;
+    gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+    gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([
+      -1, -1,  0, 0,
+       1, -1,  1, 0,
+      -1,  1,  0, 1,
+       1,  1,  1, 1,
+    ]), gl.STATIC_DRAW);
+    return buf;
+  }
+
+  private bindQuad(prog: Program) {
+    const gl = this.gl;
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.quadBuffer);
+    if (prog.attribs.a_position >= 0) {
+      gl.enableVertexAttribArray(prog.attribs.a_position);
+      gl.vertexAttribPointer(prog.attribs.a_position, 2, gl.FLOAT, false, 16, 0);
+    }
+    if (prog.attribs.a_texCoord >= 0) {
+      gl.enableVertexAttribArray(prog.attribs.a_texCoord);
+      gl.vertexAttribPointer(prog.attribs.a_texCoord, 2, gl.FLOAT, false, 16, 8);
+    }
+  }
 
   private createTexture(): WebGLTexture {
     const gl = this.gl;
@@ -155,17 +189,15 @@ export class TemporalFXEngine {
     return tex;
   }
 
-  private createFBO(width: number, height: number): { fbo: WebGLFramebuffer; tex: WebGLTexture } {
+  private createAtlasTexture(atlasW: number, atlasH: number): WebGLTexture {
     const gl = this.gl;
     const tex = this.createTexture();
     gl.bindTexture(gl.TEXTURE_2D, tex);
-    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, width, height, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
-
-    const fbo = gl.createFramebuffer()!;
-    gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
-    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
-    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
-    return { fbo, tex };
+    // Use NEAREST for atlas to avoid bleeding between tiles
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, atlasW, atlasH, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+    return tex;
   }
 
   resize(width: number, height: number) {
@@ -176,34 +208,33 @@ export class TemporalFXEngine {
     this.canvas.width = width;
     this.canvas.height = height;
 
-    // Recreate FBOs
+    const atlasW = width * ATLAS_COLS;
+    const atlasH = height * ATLAS_ROWS;
+
+    // Recreate atlas textures
+    if (this.atlasOriginal) gl.deleteTexture(this.atlasOriginal);
+    if (this.atlasProcessed) gl.deleteTexture(this.atlasProcessed);
+    this.atlasOriginal = this.createAtlasTexture(atlasW, atlasH);
+    this.atlasProcessed = this.createAtlasTexture(atlasW, atlasH);
+
+    // Recreate composite FBO
     if (this.compositeFBO) {
       gl.deleteFramebuffer(this.compositeFBO);
       gl.deleteTexture(this.compositeTexture);
     }
-    const comp = this.createFBO(width, height);
-    this.compositeFBO = comp.fbo;
-    this.compositeTexture = comp.tex;
+    this.compositeTexture = this.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, this.compositeTexture);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, width, height, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+    this.compositeFBO = gl.createFramebuffer()!;
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.compositeFBO);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, this.compositeTexture, 0);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
 
     // Resize prev frame texture
     gl.bindTexture(gl.TEXTURE_2D, this.prevFrameTexture);
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, width, height, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
 
-    // Recreate history textures
     this.clearHistory();
-    this.historyOriginal = [];
-    this.historyProcessed = [];
-    for (let i = 0; i < MAX_HISTORY; i++) {
-      const t1 = this.createTexture();
-      gl.bindTexture(gl.TEXTURE_2D, t1);
-      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, width, height, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
-      this.historyOriginal.push(t1);
-
-      const t2 = this.createTexture();
-      gl.bindTexture(gl.TEXTURE_2D, t2);
-      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, width, height, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
-      this.historyProcessed.push(t2);
-    }
   }
 
   clearHistory() {
@@ -211,15 +242,36 @@ export class TemporalFXEngine {
     this.historyFilled = 0;
   }
 
-  private uploadVideoFrame(tex: WebGLTexture, video: HTMLVideoElement | HTMLCanvasElement) {
+  private uploadVideoFrame(tex: WebGLTexture, video: HTMLVideoElement) {
     const gl = this.gl;
     gl.bindTexture(gl.TEXTURE_2D, tex);
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE, video);
   }
 
   /**
-   * Render one frame of the pipeline.
-   * Call this on every animation frame.
+   * Copy a texture into a specific tile of the atlas.
+   * tile = slot index (0..MAX_HISTORY-1)
+   */
+  private copyToAtlasTile(srcTex: WebGLTexture, atlasTex: WebGLTexture, slot: number) {
+    const gl = this.gl;
+    const col = slot % ATLAS_COLS;
+    const row = Math.floor(slot / ATLAS_COLS);
+    const xOffset = col * this.width;
+    const yOffset = row * this.height;
+
+    // Read from srcTex via copyFBO
+    gl.bindFramebuffer(gl.READ_FRAMEBUFFER, this.copyFBO);
+    gl.framebufferTexture2D(gl.READ_FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, srcTex, 0);
+
+    // Write into atlas at tile position
+    gl.bindTexture(gl.TEXTURE_2D, atlasTex);
+    gl.copyTexSubImage2D(gl.TEXTURE_2D, 0, xOffset, yOffset, 0, 0, this.width, this.height);
+
+    gl.bindFramebuffer(gl.READ_FRAMEBUFFER, null);
+  }
+
+  /**
+   * Render one frame of the full pipeline.
    */
   renderFrame(
     baseVideo: HTMLVideoElement,
@@ -229,91 +281,91 @@ export class TemporalFXEngine {
     const gl = this.gl;
     if (!this.width || !this.height) return;
 
-    // 1. Upload current base frame
+    // 1. Upload current base frame to texture
     this.uploadVideoFrame(this.baseFrameTexture, baseVideo);
+    if (maskVideo) this.uploadVideoFrame(this.maskFrameTexture, maskVideo);
 
-    // 2. Upload mask frame if available
-    if (maskVideo) {
-      this.uploadVideoFrame(this.maskFrameTexture, maskVideo);
-    }
-
-    // 3. Build history weight array
+    // 2. Build history weight array
     const depth = Math.min(state.historyDepth, this.historyFilled);
     const weightLUT = buildWeightLUT(state.historyCurve, Math.max(depth, 1));
 
-    // 4. Composite pass: blend history onto current frame
+    // Map slot indices: frame 0 = most recent = (historyHead-1), frame i = (historyHead-1-i)
+    // The atlas stores slots 0..MAX_HISTORY-1 in fixed tile positions.
+    // We need to tell the shader which atlas tile corresponds to history frame i.
+    // We do this by building a remapping: for each history frame index i (0=most recent),
+    // compute its slot in the ring buffer, then pass that as the atlas tile index.
+    // The shader's sampleHistory(i, uv) uses i directly as the atlas tile index,
+    // so we pre-sort the weight array to match atlas tile order.
+
+    // Build weight array indexed by atlas slot (not by recency)
+    const slotWeights = new Float32Array(MAX_HISTORY);
+    for (let i = 0; i < depth; i++) {
+      const slot = ((this.historyHead - 1 - i) % MAX_HISTORY + MAX_HISTORY) % MAX_HISTORY;
+      const wx = depth <= 1 ? 0.5 : i / (depth - 1);
+      const wIdx = Math.round(wx * (weightLUT.length - 1));
+      slotWeights[slot] = weightLUT[wIdx];
+    }
+
+    // Chromatic spread: find atlas slots for chromR and chromB offsets
+    const chromRSlot = depth > 0
+      ? ((this.historyHead - 1 - Math.min(Math.round(state.chromaticSpread), depth - 1)) % MAX_HISTORY + MAX_HISTORY) % MAX_HISTORY
+      : 0;
+    const chromBSlot = depth > 0
+      ? ((this.historyHead - 1 - Math.min(Math.round(state.chromaticSpread * 2), depth - 1)) % MAX_HISTORY + MAX_HISTORY) % MAX_HISTORY
+      : 0;
+
+    // Choose atlas: original or processed based on feedbackMix
+    const useProcessed = state.feedbackMix >= 0.5;
+    const histAtlas = useProcessed ? this.atlasProcessed : this.atlasOriginal;
+
+    // 3. Composite pass
     gl.bindFramebuffer(gl.FRAMEBUFFER, this.compositeFBO);
     gl.viewport(0, 0, this.width, this.height);
     gl.useProgram(this.compositeProgram.program);
+    this.bindQuad(this.compositeProgram);
 
-    // Bind quad geometry
-    this.bindQuadForProgram(this.compositeProgram);
-
-    // Bind current frame
+    // Bind textures
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D, this.baseFrameTexture);
     gl.uniform1i(this.compositeProgram.uniforms["u_current"], 0);
 
-    // Bind history textures
-    // Slot 0 = most recent history frame, slot N-1 = oldest
-    const histWeights = new Float32Array(MAX_HISTORY);
-    for (let i = 0; i < depth; i++) {
-      // i=0 is most recent (historyHead - 1), i=depth-1 is oldest
-      const slot = (this.historyHead - 1 - i + MAX_HISTORY) % MAX_HISTORY;
-      const texUnit = i + 1; // texture units 1..depth
-      gl.activeTexture(gl.TEXTURE0 + texUnit);
+    gl.activeTexture(gl.TEXTURE1);
+    gl.bindTexture(gl.TEXTURE_2D, histAtlas);
+    gl.uniform1i(this.compositeProgram.uniforms["u_historyAtlas"], 1);
 
-      // Mix between original and processed based on feedbackMix
-      const origTex = this.historyOriginal[slot];
-      const procTex = this.historyProcessed[slot];
-      // feedbackMix: 0=always original, 1=always processed output (feedback loop)
-      // Values in between use a threshold: below 0.5 = original, above = processed
-      const useProcessed = state.feedbackMix >= 0.5;
-      gl.bindTexture(gl.TEXTURE_2D, useProcessed ? procTex : origTex);
-      gl.uniform1i(this.compositeProgram.uniforms[`u_history[${i}]`], texUnit);
+    gl.activeTexture(gl.TEXTURE2);
+    gl.bindTexture(gl.TEXTURE_2D, this.prevFrameTexture);
+    gl.uniform1i(this.compositeProgram.uniforms["u_prevFrame"], 2);
 
-      // Weight: x=0 is most recent (i=0), x=1 is oldest (i=depth-1)
-      const wx = depth <= 1 ? 0.5 : i / (depth - 1);
-      histWeights[i] = weightLUT[Math.round(wx * (weightLUT.length - 1))];
-    }
+    // Uniforms
+    gl.uniform1fv(this.compositeProgram.uniforms["u_histWeights"], slotWeights);
+    gl.uniform1i(this.compositeProgram.uniforms["u_numHistory"], MAX_HISTORY); // shader iterates all slots
 
-    gl.uniform1fv(this.compositeProgram.uniforms["u_histWeights"], histWeights);
-    gl.uniform1i(this.compositeProgram.uniforms["u_numHistory"], depth);
-
-    // Blend mode
     const blendModeIndex = ["screen", "add", "multiply", "overlay", "difference", "average"]
       .indexOf(state.blendMode);
     gl.uniform1i(this.compositeProgram.uniforms["u_blendMode"], blendModeIndex);
     gl.uniform1f(this.compositeProgram.uniforms["u_blendStrength"], state.blendStrength);
 
-    // Pixel weight mode
     const weightModeIndex = ["uniform", "luminance", "darkness", "motion"]
       .indexOf(state.pixelWeightMode);
     gl.uniform1i(this.compositeProgram.uniforms["u_weightMode"], weightModeIndex);
 
-    // Pixel weight curve LUT (64 samples)
     const weightCurveLUT = buildWeightLUT(state.pixelWeightCurve, 64);
     gl.uniform1fv(this.compositeProgram.uniforms["u_weightCurve"], weightCurveLUT);
     gl.uniform1i(this.compositeProgram.uniforms["u_weightCurveLen"], 64);
 
-    // Prev frame for motion
-    const prevUnit = depth + 1;
-    gl.activeTexture(gl.TEXTURE0 + prevUnit);
-    gl.bindTexture(gl.TEXTURE_2D, this.prevFrameTexture);
-    gl.uniform1i(this.compositeProgram.uniforms["u_prevFrame"], prevUnit);
-
-    // Chromatic spread
-    const spread = Math.round(state.chromaticSpread);
-    gl.uniform1i(this.compositeProgram.uniforms["u_chromR"], Math.min(spread, depth - 1));
-    gl.uniform1i(this.compositeProgram.uniforms["u_chromB"], Math.min(spread * 2, depth - 1));
+    gl.uniform1i(this.compositeProgram.uniforms["u_chromR"],
+      state.chromaticSpread > 0 ? chromRSlot : -1);
+    gl.uniform1i(this.compositeProgram.uniforms["u_chromB"],
+      state.chromaticSpread > 0 ? chromBSlot : -1);
 
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
 
-    // 5. Overlay pass: composite subject over FX background
+    // 4. Overlay pass: composite subject over FX background
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     gl.viewport(0, 0, this.width, this.height);
     gl.useProgram(this.overlayProgram.program);
-    this.bindQuadForProgram(this.overlayProgram);
+    this.bindQuad(this.overlayProgram);
 
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D, this.compositeTexture);
@@ -329,7 +381,6 @@ export class TemporalFXEngine {
 
     gl.uniform1i(this.overlayProgram.uniforms["u_hasMask"], maskVideo ? 1 : 0);
 
-    // Mask colors
     for (let i = 0; i < 5; i++) {
       const c = state.maskColors[i];
       gl.uniform3f(this.overlayProgram.uniforms[`u_maskColors[${i}]`], c.r, c.g, c.b);
@@ -338,69 +389,34 @@ export class TemporalFXEngine {
 
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
 
-    // 6. Store current frame into history ring buffer
-    // Write original
-    gl.bindFramebuffer(gl.FRAMEBUFFER, null); // unbind
-    // Use a temp FBO to copy base frame into history slot
-    this.copyTextureToHistory(this.baseFrameTexture, this.historyOriginal[this.historyHead]);
-    // Copy composite output into processed history
-    this.copyTextureToHistory(this.compositeTexture, this.historyProcessed[this.historyHead]);
-    // Copy current base to prevFrame for next frame's motion detection
-    this.copyTextureToHistory(this.baseFrameTexture, this.prevFrameTexture);
+    // 5. Store current frame into history ring buffer
+    const slot = this.historyHead;
+    this.copyToAtlasTile(this.baseFrameTexture, this.atlasOriginal, slot);
+    this.copyToAtlasTile(this.compositeTexture, this.atlasProcessed, slot);
+
+    // Copy base frame to prevFrame for next frame's motion detection
+    gl.bindFramebuffer(gl.READ_FRAMEBUFFER, this.copyFBO);
+    gl.framebufferTexture2D(gl.READ_FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, this.baseFrameTexture, 0);
+    gl.bindTexture(gl.TEXTURE_2D, this.prevFrameTexture);
+    gl.copyTexSubImage2D(gl.TEXTURE_2D, 0, 0, 0, 0, 0, this.width, this.height);
+    gl.bindFramebuffer(gl.READ_FRAMEBUFFER, null);
 
     this.historyHead = (this.historyHead + 1) % MAX_HISTORY;
     this.historyFilled = Math.min(this.historyFilled + 1, MAX_HISTORY);
-  }
-
-  private copyFBO!: WebGLFramebuffer;
-
-  private copyTextureToHistory(src: WebGLTexture, dst: WebGLTexture) {
-    const gl = this.gl;
-    if (!this.copyFBO) {
-      this.copyFBO = gl.createFramebuffer()!;
-    }
-    gl.bindFramebuffer(gl.READ_FRAMEBUFFER, this.copyFBO);
-    gl.framebufferTexture2D(gl.READ_FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, src, 0);
-    gl.bindTexture(gl.TEXTURE_2D, dst);
-    gl.copyTexSubImage2D(gl.TEXTURE_2D, 0, 0, 0, 0, 0, this.width, this.height);
-    gl.bindFramebuffer(gl.READ_FRAMEBUFFER, null);
-  }
-
-  private bindQuadForProgram(prog: Program) {
-    const gl = this.gl;
-    if (!this.quadBuffer) {
-      this.quadBuffer = gl.createBuffer()!;
-      const data = new Float32Array([
-        -1, -1,  0, 0,
-         1, -1,  1, 0,
-        -1,  1,  0, 1,
-         1,  1,  1, 1,
-      ]);
-      gl.bindBuffer(gl.ARRAY_BUFFER, this.quadBuffer);
-      gl.bufferData(gl.ARRAY_BUFFER, data, gl.STATIC_DRAW);
-    }
-    gl.bindBuffer(gl.ARRAY_BUFFER, this.quadBuffer);
-    if (prog.attribs.a_position >= 0) {
-      gl.enableVertexAttribArray(prog.attribs.a_position);
-      gl.vertexAttribPointer(prog.attribs.a_position, 2, gl.FLOAT, false, 16, 0);
-    }
-    if (prog.attribs.a_texCoord >= 0) {
-      gl.enableVertexAttribArray(prog.attribs.a_texCoord);
-      gl.vertexAttribPointer(prog.attribs.a_texCoord, 2, gl.FLOAT, false, 16, 8);
-    }
   }
 
   dispose() {
     const gl = this.gl;
     gl.deleteProgram(this.compositeProgram.program);
     gl.deleteProgram(this.overlayProgram.program);
-    gl.deleteProgram(this.passthroughProgram.program);
-    this.historyOriginal.forEach(t => gl.deleteTexture(t));
-    this.historyProcessed.forEach(t => gl.deleteTexture(t));
+    gl.deleteTexture(this.atlasOriginal);
+    gl.deleteTexture(this.atlasProcessed);
     gl.deleteTexture(this.baseFrameTexture);
     gl.deleteTexture(this.maskFrameTexture);
     gl.deleteTexture(this.prevFrameTexture);
     gl.deleteTexture(this.compositeTexture);
     gl.deleteFramebuffer(this.compositeFBO);
+    gl.deleteFramebuffer(this.copyFBO);
+    gl.deleteBuffer(this.quadBuffer);
   }
 }
