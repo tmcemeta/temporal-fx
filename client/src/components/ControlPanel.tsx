@@ -1,24 +1,18 @@
-// TEMPORAL FX — ControlPanel Component
+// SIMPLE SUBJECT — ControlPanel Component
 // "Cinematic Void" design: dark panel, teal section headers, DM Mono typography.
-// Contains all FX parameters + mask colors + presets + save/load state.
-//
-// Media section: single "Load Video" button for hstack-encoded files.
-// The mask color picker and related controls remain — they drive the chroma-key
-// compositing in the overlay shader, which still operates on the mask half.
+// Contains only subject extraction controls: mask keys, edge quality, view modes.
 
-import React, { useRef } from "react";
-import type { FXState, BlendMode, PixelWeightMode } from "@/lib/types";
-import { DEFAULT_STATE, PRESETS } from "@/lib/types";
-import BezierEditor from "./BezierEditor";
+import React from "react";
+import type { SubjectState, ViewMode } from "@/lib/types";
+import { DEFAULT_STATE } from "@/lib/types";
 import MaskColorPicker from "./MaskColorPicker";
 
 interface Props {
-  state: FXState;
-  onChange: (patch: Partial<FXState>) => void;
+  state: SubjectState;
+  onChange: (patch: Partial<SubjectState>) => void;
   onLoadVideo: () => void;
   hasVideo: boolean;
   videoFileName: string;
-  bufferWarmup: number; // 0..1, how full the history buffer is
 }
 
 const SECTION_STYLE: React.CSSProperties = {
@@ -48,7 +42,7 @@ const VALUE_STYLE: React.CSSProperties = {
   fontFamily: "'DM Mono', monospace",
   fontSize: "11px",
   color: "#4ecdc4",
-  minWidth: "32px",
+  minWidth: "36px",
   textAlign: "right" as const,
 };
 
@@ -56,12 +50,21 @@ const PARAM_LABEL: React.CSSProperties = {
   fontFamily: "'DM Mono', monospace",
   fontSize: "11px",
   color: "rgba(232,232,232,0.7)",
-  minWidth: "90px",
+  minWidth: "110px",
   flexShrink: 0,
+};
+
+const HINT_STYLE: React.CSSProperties = {
+  fontFamily: "'DM Mono', monospace",
+  fontSize: "9px",
+  color: "rgba(78,205,196,0.35)",
+  letterSpacing: "0.05em",
+  marginTop: "3px",
 };
 
 function SliderRow({
   label,
+  hint,
   value,
   min,
   max,
@@ -70,6 +73,7 @@ function SliderRow({
   display,
 }: {
   label: string;
+  hint?: string;
   value: number;
   min: number;
   max: number;
@@ -78,18 +82,71 @@ function SliderRow({
   display?: string;
 }) {
   return (
-    <div style={ROW_STYLE}>
-      <span style={PARAM_LABEL}>{label}</span>
-      <input
-        type="range"
-        min={min}
-        max={max}
-        step={step}
-        value={value}
-        onChange={e => onChange(parseFloat(e.target.value))}
-        style={{ flex: 1 }}
-      />
-      <span style={VALUE_STYLE}>{display ?? value}</span>
+    <div style={{ marginBottom: "12px" }}>
+      <div style={ROW_STYLE}>
+        <span style={PARAM_LABEL}>{label}</span>
+        <input
+          type="range"
+          min={min}
+          max={max}
+          step={step}
+          value={value}
+          onChange={e => onChange(parseFloat(e.target.value))}
+          style={{ flex: 1 }}
+        />
+        <span style={VALUE_STYLE}>{display ?? value}</span>
+      </div>
+      {hint && <div style={HINT_STYLE}>{hint}</div>}
+    </div>
+  );
+}
+
+function ToggleRow({
+  label,
+  hint,
+  active,
+  onToggle,
+}: {
+  label: string;
+  hint?: string;
+  active: boolean;
+  onToggle: () => void;
+}) {
+  return (
+    <div style={{ marginBottom: "10px" }}>
+      <button
+        onClick={onToggle}
+        style={{
+          width: "100%",
+          background: active ? "rgba(78,205,196,0.12)" : "rgba(255,255,255,0.03)",
+          border: `1px solid ${active ? "rgba(78,205,196,0.5)" : "rgba(255,255,255,0.1)"}`,
+          color: active ? "#4ecdc4" : "rgba(232,232,232,0.45)",
+          padding: "6px 10px",
+          fontFamily: "'DM Mono', monospace",
+          fontSize: "10px",
+          cursor: "pointer",
+          borderRadius: "2px",
+          textAlign: "left" as const,
+          letterSpacing: "0.08em",
+          transition: "all 0.15s",
+          display: "flex",
+          alignItems: "center",
+          gap: "7px",
+        }}
+      >
+        <span style={{
+          width: "10px",
+          height: "10px",
+          borderRadius: "2px",
+          border: `1px solid ${active ? "#4ecdc4" : "rgba(255,255,255,0.2)"}`,
+          background: active ? "#4ecdc4" : "transparent",
+          display: "inline-block",
+          flexShrink: 0,
+          transition: "all 0.15s",
+        }} />
+        {label}
+      </button>
+      {hint && <div style={{ ...HINT_STYLE, marginTop: "4px" }}>{hint}</div>}
     </div>
   );
 }
@@ -100,45 +157,13 @@ export default function ControlPanel({
   onLoadVideo,
   hasVideo,
   videoFileName,
-  bufferWarmup,
 }: Props) {
-  const saveRef = useRef<HTMLAnchorElement>(null);
-  const loadRef = useRef<HTMLInputElement>(null);
-
-  const handleSave = () => {
-    const json = JSON.stringify(state, null, 2);
-    const blob = new Blob([json], { type: "application/json" });
-    const url = URL.createObjectURL(blob);
-    const a = saveRef.current!;
-    a.href = url;
-    a.download = "temporal-fx-state.json";
-    a.click();
-    URL.revokeObjectURL(url);
-  };
-
-  const handleLoad = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    const reader = new FileReader();
-    reader.onload = ev => {
-      try {
-        const loaded = JSON.parse(ev.target?.result as string) as FXState;
-        onChange(loaded);
-      } catch {
-        alert("Invalid state file.");
-      }
-    };
-    reader.readAsText(file);
-    e.target.value = "";
-  };
-
-  const applyPreset = (name: string) => {
-    const preset = PRESETS[name];
-    if (preset) onChange(preset);
-  };
-
-  const blendModes: BlendMode[] = ["screen", "add", "multiply", "overlay", "difference", "average"];
-  const weightModes: PixelWeightMode[] = ["uniform", "luminance", "darkness", "motion"];
+  const VIEW_LABELS: { label: string; mode: ViewMode }[] = [
+    { label: "Normal", mode: 0 },
+    { label: "Subject", mode: 1 },
+    { label: "Background", mode: 2 },
+    { label: "Raw Input", mode: 3 },
+  ];
 
   return (
     <div style={{
@@ -165,7 +190,7 @@ export default function ControlPanel({
           fontWeight: 500,
           color: "#e8e8e8",
           letterSpacing: "0.05em",
-        }}>TEMPORAL FX</span>
+        }}>SIMPLE SUBJECT</span>
         <span style={{
           fontFamily: "'DM Mono', monospace",
           fontSize: "9px",
@@ -174,7 +199,7 @@ export default function ControlPanel({
         }}>v1.0</span>
       </div>
 
-      {/* Media Load — single hstack video */}
+      {/* Media Load */}
       <div style={SECTION_STYLE}>
         <span style={LABEL_STYLE}>Media</span>
         <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
@@ -199,329 +224,38 @@ export default function ControlPanel({
             {hasVideo ? `✓ ${videoFileName}` : "Load Video"}
           </button>
 
-          {/* Hstack toggle */}
-          <button
-            onClick={() => onChange({ isHstack: !state.isHstack })}
-            style={{
-              width: "100%",
-              background: state.isHstack
-                ? "rgba(78,205,196,0.12)"
-                : "rgba(255,255,255,0.03)",
-              border: `1px solid ${
-                state.isHstack
-                  ? "rgba(78,205,196,0.5)"
-                  : "rgba(255,255,255,0.1)"
-              }`,
-              color: state.isHstack
-                ? "#4ecdc4"
-                : "rgba(232,232,232,0.45)",
-              padding: "6px 10px",
-              fontFamily: "'DM Mono', monospace",
-              fontSize: "10px",
-              cursor: "pointer",
-              borderRadius: "2px",
-              textAlign: "left" as const,
-              letterSpacing: "0.08em",
-              transition: "all 0.15s",
-              display: "flex",
-              alignItems: "center",
-              gap: "7px",
-            }}
-          >
-            <span style={{
-              width: "10px",
-              height: "10px",
-              borderRadius: "2px",
-              border: `1px solid ${
-                state.isHstack
-                  ? "#4ecdc4"
-                  : "rgba(255,255,255,0.2)"
-              }`,
-              background: state.isHstack
-                ? "#4ecdc4"
-                : "transparent",
-              display: "inline-block",
-              flexShrink: 0,
-              transition: "all 0.15s",
-            }} />
-            Side-by-Side Input (base | mask)
-          </button>
-
-          {/* Hint line */}
-          {state.isHstack && (
-            <div style={{
-              fontFamily: "'DM Mono', monospace",
-              fontSize: "9px",
-              color: "rgba(78,205,196,0.3)",
-              letterSpacing: "0.06em",
-              paddingLeft: "2px",
-            }}>
-              left half = base, right half = mask
-            </div>
-          )}
-
-          {/* Mask color controls — always shown; they key against the mask half */}
-          <div style={{ marginTop: "6px" }}>
-            <div style={{ ...ROW_STYLE, marginBottom: "8px" }}>
-              <span style={PARAM_LABEL}>Mask Colors</span>
-              <input
-                type="range"
-                min={1}
-                max={5}
-                step={1}
-                value={state.maskCount ?? 1}
-                onChange={e => onChange({ maskCount: parseInt(e.target.value) })}
-                style={{ flex: 1 }}
-              />
-              <span style={VALUE_STYLE}>{state.maskCount ?? 1}</span>
-            </div>
-
-            <button
-              onClick={() => onChange({ excludeMaskFromEffect: !state.excludeMaskFromEffect })}
-              style={{
-                width: "100%",
-                background: state.excludeMaskFromEffect
-                  ? "rgba(78,205,196,0.12)"
-                  : "rgba(255,255,255,0.03)",
-                border: `1px solid ${
-                  state.excludeMaskFromEffect
-                    ? "rgba(78,205,196,0.5)"
-                    : "rgba(255,255,255,0.1)"
-                }`,
-                color: state.excludeMaskFromEffect
-                  ? "#4ecdc4"
-                  : "rgba(232,232,232,0.45)",
-                padding: "6px 10px",
-                fontFamily: "'DM Mono', monospace",
-                fontSize: "10px",
-                cursor: "pointer",
-                borderRadius: "2px",
-                textAlign: "left" as const,
-                letterSpacing: "0.08em",
-                transition: "all 0.15s",
-                display: "flex",
-                alignItems: "center",
-                gap: "7px",
-                marginBottom: "6px",
-              }}
-            >
-              <span style={{
-                width: "10px",
-                height: "10px",
-                borderRadius: "2px",
-                border: `1px solid ${
-                  state.excludeMaskFromEffect
-                    ? "#4ecdc4"
-                    : "rgba(255,255,255,0.2)"
-                }`,
-                background: state.excludeMaskFromEffect
-                  ? "#4ecdc4"
-                  : "transparent",
-                display: "inline-block",
-                flexShrink: 0,
-                transition: "all 0.15s",
-              }} />
-              Exclude Mask from Effect
-            </button>
-
-            <MaskColorPicker
-              colors={state.maskColors.slice(0, state.maskCount ?? 1)}
-              onChange={(i, color) => {
-                const newColors = [...state.maskColors];
-                newColors[i] = color;
-                onChange({ maskColors: newColors });
-              }}
-            />
-          </div>
-        </div>
-      </div>
-
-      {/* Presets */}
-      <div style={SECTION_STYLE}>
-        <span style={LABEL_STYLE}>Presets</span>
-        <div style={{ display: "flex", flexWrap: "wrap", gap: "5px" }}>
-          {Object.keys(PRESETS).map(name => (
-            <button
-              key={name}
-              onClick={() => applyPreset(name)}
-              style={{
-                background: "rgba(255,255,255,0.03)",
-                border: "1px solid rgba(255,255,255,0.1)",
-                color: "rgba(232,232,232,0.65)",
-                padding: "4px 8px",
-                fontFamily: "'DM Mono', monospace",
-                fontSize: "10px",
-                cursor: "pointer",
-                borderRadius: "2px",
-                transition: "all 0.15s",
-                letterSpacing: "0.05em",
-              }}
-              onMouseEnter={e => {
-                (e.currentTarget as HTMLButtonElement).style.borderColor = "#4ecdc4";
-                (e.currentTarget as HTMLButtonElement).style.color = "#4ecdc4";
-              }}
-              onMouseLeave={e => {
-                (e.currentTarget as HTMLButtonElement).style.borderColor = "rgba(255,255,255,0.1)";
-                (e.currentTarget as HTMLButtonElement).style.color = "rgba(232,232,232,0.65)";
-              }}
-            >
-              {name}
-            </button>
-          ))}
-          <button
-            onClick={() => onChange(DEFAULT_STATE)}
-            style={{
-              background: "rgba(255,255,255,0.03)",
-              border: "1px solid rgba(255,255,255,0.06)",
-              color: "rgba(160,160,160,0.5)",
-              padding: "4px 8px",
-              fontFamily: "'DM Mono', monospace",
-              fontSize: "10px",
-              cursor: "pointer",
-              borderRadius: "2px",
-              transition: "all 0.15s",
-            }}
-          >
-            Reset
-          </button>
-        </div>
-      </div>
-
-      {/* Temporal */}
-      <div style={SECTION_STYLE}>
-        <span style={LABEL_STYLE}>Temporal</span>
-
-        <SliderRow
-          label="History Depth"
-          value={state.historyDepth}
-          min={0}
-          max={60}
-          step={1}
-          onChange={v => onChange({ historyDepth: v })}
-          display={`${state.historyDepth}f`}
-        />
-
-        <SliderRow
-          label="Feedback Mix"
-          value={state.feedbackMix}
-          min={0}
-          max={1}
-          step={0.01}
-          onChange={v => onChange({ feedbackMix: v })}
-          display={state.feedbackMix.toFixed(2)}
-        />
-
-        <div style={{ marginBottom: "4px" }}>
-          <div style={{ display: "flex", justifyContent: "space-between", marginBottom: "6px" }}>
-            <span style={{ ...PARAM_LABEL, fontSize: "10px" }}>History Curve</span>
-            <span style={{ fontSize: "9px", color: "rgba(78,205,196,0.4)" }}>dbl-click to reset</span>
-          </div>
-          <BezierEditor
-            value={state.historyCurve}
-            onChange={c => onChange({ historyCurve: c })}
-            width={292}
-            height={90}
-            xLabel="recent → old"
-            yLabel="weight"
+          <ToggleRow
+            label="Side-by-Side Input (base | mask)"
+            hint={state.isHstack ? "left half = base, right half = mask" : undefined}
+            active={state.isHstack}
+            onToggle={() => onChange({ isHstack: !state.isHstack })}
           />
         </div>
       </div>
 
-      {/* Pixel Weight */}
+      {/* View Mode */}
       <div style={SECTION_STYLE}>
-        <span style={LABEL_STYLE}>Pixel Weight</span>
-
-        <div style={ROW_STYLE}>
-          <span style={PARAM_LABEL}>Mode</span>
-          <select
-            value={state.pixelWeightMode}
-            onChange={e => onChange({ pixelWeightMode: e.target.value as PixelWeightMode })}
-            style={{ flex: 1 }}
-          >
-            {weightModes.map(m => (
-              <option key={m} value={m}>{m}</option>
-            ))}
-          </select>
-        </div>
-
-        {state.pixelWeightMode !== "uniform" && (
-          <div style={{ marginBottom: "4px" }}>
-            <div style={{ display: "flex", justifyContent: "space-between", marginBottom: "6px" }}>
-              <span style={{ ...PARAM_LABEL, fontSize: "10px" }}>Weight Curve</span>
-              <span style={{ fontSize: "9px", color: "rgba(78,205,196,0.4)" }}>dbl-click to reset</span>
-            </div>
-            <BezierEditor
-              value={state.pixelWeightCurve}
-              onChange={c => onChange({ pixelWeightCurve: c })}
-              width={292}
-              height={90}
-              xLabel="value →"
-              yLabel="contrib"
-            />
-          </div>
-        )}
-      </div>
-
-      {/* Blend */}
-      <div style={SECTION_STYLE}>
-        <span style={LABEL_STYLE}>Blend</span>
-
-        <div style={ROW_STYLE}>
-          <span style={PARAM_LABEL}>Mode</span>
-          <select
-            value={state.blendMode}
-            onChange={e => onChange({ blendMode: e.target.value as BlendMode })}
-            style={{ flex: 1 }}
-          >
-            {blendModes.map(m => (
-              <option key={m} value={m}>{m}</option>
-            ))}
-          </select>
-        </div>
-
-        <SliderRow
-          label="Strength"
-          value={state.blendStrength}
-          min={0}
-          max={1}
-          step={0.01}
-          onChange={v => onChange({ blendStrength: v })}
-          display={state.blendStrength.toFixed(2)}
-        />
-
-        <SliderRow
-          label="Chroma Spread"
-          value={state.chromaticSpread}
-          min={0}
-          max={10}
-          step={0.5}
-          onChange={v => onChange({ chromaticSpread: v })}
-          display={state.chromaticSpread === 0 ? "off" : `${state.chromaticSpread}f`}
-        />
-      </div>
-
-      {/* Debug View */}
-      <div style={{ ...SECTION_STYLE, paddingTop: "10px", paddingBottom: "10px" }}>
-        <span style={LABEL_STYLE}>Debug View</span>
-        <div style={{ display: "flex", gap: "5px" }}>
-          {(["Normal", "Subject", "Background"] as const).map((label, idx) => {
-            const active = (state.debugView ?? 0) === idx;
+        <span style={LABEL_STYLE}>View</span>
+        <div style={{ display: "flex", gap: "5px", marginBottom: "8px" }}>
+          {VIEW_LABELS.map(({ label, mode }) => {
+            const active = state.viewMode === mode;
             return (
               <button
-                key={label}
-                onClick={() => onChange({ debugView: idx as 0 | 1 | 2 })}
+                key={mode}
+                onClick={() => onChange({ viewMode: mode })}
                 style={{
                   flex: 1,
                   background: active ? "rgba(78,205,196,0.14)" : "rgba(255,255,255,0.03)",
                   border: `1px solid ${active ? "rgba(78,205,196,0.5)" : "rgba(255,255,255,0.1)"}`,
                   color: active ? "#4ecdc4" : "rgba(232,232,232,0.45)",
-                  padding: "5px 4px",
+                  padding: "5px 2px",
                   fontFamily: "'DM Mono', monospace",
-                  fontSize: "10px",
+                  fontSize: "9px",
                   cursor: "pointer",
                   borderRadius: "2px",
-                  letterSpacing: "0.06em",
+                  letterSpacing: "0.05em",
                   transition: "all 0.15s",
+                  whiteSpace: "nowrap",
                 }}
               >
                 {label}
@@ -529,36 +263,121 @@ export default function ControlPanel({
             );
           })}
         </div>
+
+        {/* Raw Input half selector */}
+        {state.viewMode === 3 && (
+          <div style={{ display: "flex", gap: "5px" }}>
+            {[{ label: "Base", val: true }, { label: "Mask", val: false }].map(({ label, val }) => {
+              const active = state.rawInputShowBase === val;
+              return (
+                <button
+                  key={label}
+                  onClick={() => onChange({ rawInputShowBase: val })}
+                  style={{
+                    flex: 1,
+                    background: active ? "rgba(78,205,196,0.1)" : "rgba(255,255,255,0.02)",
+                    border: `1px solid ${active ? "rgba(78,205,196,0.4)" : "rgba(255,255,255,0.08)"}`,
+                    color: active ? "#4ecdc4" : "rgba(232,232,232,0.35)",
+                    padding: "4px",
+                    fontFamily: "'DM Mono', monospace",
+                    fontSize: "9px",
+                    cursor: "pointer",
+                    borderRadius: "2px",
+                    letterSpacing: "0.05em",
+                    transition: "all 0.15s",
+                  }}
+                >
+                  {label}
+                </button>
+              );
+            })}
+          </div>
+        )}
       </div>
 
-      {/* Buffer warmup indicator */}
-      {bufferWarmup < 1 && state.historyDepth > 0 && (
-        <div style={{ padding: "8px 14px", borderBottom: "1px solid rgba(78,205,196,0.08)" }}>
-          <div style={{ display: "flex", justifyContent: "space-between", marginBottom: "4px" }}>
-            <span style={{ fontSize: "9px", color: "rgba(78,205,196,0.5)", fontFamily: "'DM Mono', monospace" }}>
-              BUFFER WARMING
-            </span>
-            <span style={{ fontSize: "9px", color: "rgba(78,205,196,0.5)", fontFamily: "'DM Mono', monospace" }}>
-              {Math.round(bufferWarmup * 100)}%
-            </span>
-          </div>
-          <div style={{ height: "2px", background: "rgba(255,255,255,0.06)", borderRadius: "1px" }}>
-            <div style={{
-              height: "100%",
-              width: `${bufferWarmup * 100}%`,
-              background: "#4ecdc4",
-              borderRadius: "1px",
-              transition: "width 0.1s linear",
-              boxShadow: "0 0 6px rgba(78,205,196,0.6)",
-            }} />
-          </div>
-        </div>
-      )}
+      {/* Mask Keys */}
+      <div style={SECTION_STYLE}>
+        <span style={LABEL_STYLE}>Mask Keys</span>
 
-      {/* Keyboard shortcuts hint */}
-      <div style={{ padding: "8px 14px", borderTop: "1px solid rgba(78,205,196,0.06)", borderBottom: "1px solid rgba(78,205,196,0.06)" }}>
+        <div style={{ ...ROW_STYLE, marginBottom: "12px" }}>
+          <span style={PARAM_LABEL}>Active Colors</span>
+          <input
+            type="range"
+            min={1}
+            max={5}
+            step={1}
+            value={state.maskCount}
+            onChange={e => onChange({ maskCount: parseInt(e.target.value) })}
+            style={{ flex: 1 }}
+          />
+          <span style={VALUE_STYLE}>{state.maskCount}</span>
+        </div>
+
+        <MaskColorPicker
+          colors={state.maskColors.slice(0, state.maskCount)}
+          allColors={state.maskColors}
+          onChange={(i, color) => {
+            const newColors = [...state.maskColors];
+            newColors[i] = color;
+            onChange({ maskColors: newColors });
+          }}
+        />
+
+        <div style={{ ...HINT_STYLE, marginTop: "8px" }}>
+          click a swatch to change the key color
+        </div>
+      </div>
+
+      {/* Keying Quality */}
+      <div style={SECTION_STYLE}>
+        <span style={LABEL_STYLE}>Keying Quality</span>
+
+        <SliderRow
+          label="Edge Softness"
+          hint="color-distance tolerance — lower = harder edge"
+          value={state.edgeSoftness}
+          min={0.05}
+          max={2.0}
+          step={0.05}
+          onChange={v => onChange({ edgeSoftness: v })}
+          display={state.edgeSoftness.toFixed(2)}
+        />
+
+        <SliderRow
+          label="Min Luma"
+          hint="ignore mask pixels darker than this — prevents shadow bleed"
+          value={state.minLuma}
+          min={0}
+          max={0.5}
+          step={0.01}
+          onChange={v => onChange({ minLuma: v })}
+          display={state.minLuma.toFixed(2)}
+        />
+
+        <ToggleRow
+          label="Spill Suppression"
+          hint="desaturates key-color fringing on subject edges"
+          active={state.spillSuppression}
+          onToggle={() => onChange({ spillSuppression: !state.spillSuppression })}
+        />
+
+        {state.spillSuppression && (
+          <SliderRow
+            label="Spill Strength"
+            value={state.spillStrength}
+            min={0}
+            max={1}
+            step={0.05}
+            onChange={v => onChange({ spillStrength: v })}
+            display={state.spillStrength.toFixed(2)}
+          />
+        )}
+      </div>
+
+      {/* Keyboard shortcuts */}
+      <div style={{ padding: "8px 14px", borderBottom: "1px solid rgba(78,205,196,0.06)" }}>
         <div style={{ display: "flex", gap: "16px", flexWrap: "wrap" }}>
-          {[["space", "play/pause"], ["dbl-click", "reset curve"]].map(([key, desc]) => (
+          {[["space", "play/pause"]].map(([key, desc]) => (
             <div key={key} style={{ display: "flex", gap: "5px", alignItems: "center" }}>
               <span style={{
                 fontFamily: "'DM Mono', monospace",
@@ -575,53 +394,26 @@ export default function ControlPanel({
         </div>
       </div>
 
-      {/* Save / Load */}
+      {/* Reset */}
       <div style={{ padding: "12px 14px", marginTop: "auto" }}>
-        <span style={LABEL_STYLE}>State</span>
-        <div style={{ display: "flex", gap: "6px" }}>
-          <button
-            onClick={handleSave}
-            style={{
-              flex: 1,
-              background: "rgba(78,205,196,0.08)",
-              border: "1px solid rgba(78,205,196,0.3)",
-              color: "#4ecdc4",
-              padding: "7px",
-              fontFamily: "'DM Mono', monospace",
-              fontSize: "11px",
-              cursor: "pointer",
-              borderRadius: "2px",
-              transition: "all 0.15s",
-            }}
-          >
-            Save JSON
-          </button>
-          <button
-            onClick={() => loadRef.current?.click()}
-            style={{
-              flex: 1,
-              background: "rgba(255,255,255,0.04)",
-              border: "1px solid rgba(255,255,255,0.1)",
-              color: "rgba(232,232,232,0.6)",
-              padding: "7px",
-              fontFamily: "'DM Mono', monospace",
-              fontSize: "11px",
-              cursor: "pointer",
-              borderRadius: "2px",
-              transition: "all 0.15s",
-            }}
-          >
-            Load JSON
-          </button>
-        </div>
-        <a ref={saveRef} style={{ display: "none" }} />
-        <input
-          ref={loadRef}
-          type="file"
-          accept=".json"
-          style={{ display: "none" }}
-          onChange={handleLoad}
-        />
+        <button
+          onClick={() => onChange(DEFAULT_STATE)}
+          style={{
+            width: "100%",
+            background: "rgba(255,255,255,0.03)",
+            border: "1px solid rgba(255,255,255,0.08)",
+            color: "rgba(160,160,160,0.5)",
+            padding: "7px",
+            fontFamily: "'DM Mono', monospace",
+            fontSize: "11px",
+            cursor: "pointer",
+            borderRadius: "2px",
+            transition: "all 0.15s",
+            letterSpacing: "0.06em",
+          }}
+        >
+          Reset to Defaults
+        </button>
       </div>
     </div>
   );

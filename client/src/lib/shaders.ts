@@ -1,17 +1,6 @@
-// TEMPORAL FX — WebGL Shader Source
-// All rendering is done in WebGL2.
-//
-// KEY ARCHITECTURE DECISION:
-// GLSL/WebGL2 does not allow dynamic indexing of sampler arrays
-// (e.g. texture(u_history[i], uv) where i is non-constant is illegal).
-//
-// Solution: pack all history frames into a single TEXTURE ATLAS.
-// The atlas is a tall 2D texture: each row of ATLAS_COLS tiles holds
-// one frame. We address a specific frame by computing its UV tile offset.
-//
-// Atlas layout: width = videoWidth * ATLAS_COLS, height = videoHeight * numRows
-// Frame index f → tile col = f % ATLAS_COLS, tile row = floor(f / ATLAS_COLS)
-// UV for frame f at pixel uv: ((uv.x + col) / ATLAS_COLS, (uv.y + row) / numRows)
+// SIMPLE SUBJECT — WebGL Shader Source
+// Only the subject extraction overlay shader is used here.
+// The temporal compositing pipeline has been removed entirely.
 
 export const VERTEX_SHADER = `#version 300 es
 in vec2 a_position;
@@ -23,260 +12,8 @@ void main() {
 }
 `;
 
-export const MAX_HISTORY = 60;
-// Atlas layout will be computed dynamically based on WebGL max texture size
-// These are the maximum possible values; actual layout is computed in resize()
-export const ATLAS_COLS = 6;
-export const ATLAS_ROWS = 10; // ceil(MAX_HISTORY / ATLAS_COLS)
-
-export const COMPOSITE_SHADER = `#version 300 es
-precision highp float;
-
-#define MAX_HISTORY ${MAX_HISTORY}
-
-in vec2 v_texCoord;
-out vec4 fragColor;
-
-// Current frame
-uniform sampler2D u_current;
-// History atlas: all history frames packed into one texture
-// Layout: ATLAS_COLS columns x ATLAS_ROWS rows of frame tiles
-uniform sampler2D u_historyAtlas;
-// Previous frame for motion detection (separate texture, no atlas needed)
-uniform sampler2D u_prevFrame;
-
-uniform float u_histWeights[MAX_HISTORY];
-uniform int u_numHistory;
-uniform int u_blendMode;
-uniform float u_blendStrength;
-uniform int u_weightMode;
-uniform int u_chromR;
-uniform int u_chromB;
-uniform float u_weightCurve[64];
-uniform int u_weightCurveLen;
-
-// Dynamic atlas layout
-uniform int u_atlasCols;
-uniform int u_atlasRows;
-
-// Mask exclusion
-uniform bool u_excludeMask;
-uniform sampler2D u_maskTex;
-uniform vec3 u_maskExcludeColors[5];
-uniform int u_numMaskExcludeColors;
-
-// Sample a specific frame from the atlas by index (0 = most recent)
-vec4 sampleHistory(int frameIdx, vec2 uv) {
-  int col = frameIdx - (frameIdx / u_atlasCols) * u_atlasCols; // frameIdx % u_atlasCols
-  int row = frameIdx / u_atlasCols;
-  float u = (uv.x + float(col)) / float(u_atlasCols);
-  float v = (uv.y + float(row)) / float(u_atlasRows);
-  return texture(u_historyAtlas, vec2(u, v));
-}
-
-vec3 blendScreen(vec3 base, vec3 blend) {
-  return 1.0 - (1.0 - base) * (1.0 - blend);
-}
-vec3 blendAdd(vec3 base, vec3 blend) {
-  return clamp(base + blend, 0.0, 1.0);
-}
-vec3 blendMultiply(vec3 base, vec3 blend) {
-  return base * blend;
-}
-vec3 blendOverlay(vec3 base, vec3 blend) {
-  return mix(
-    2.0 * base * blend,
-    1.0 - 2.0 * (1.0 - base) * (1.0 - blend),
-    step(0.5, base)
-  );
-}
-vec3 blendDifference(vec3 base, vec3 blend) {
-  return abs(base - blend);
-}
-vec3 blendAverage(vec3 base, vec3 blend) {
-  return (base + blend) * 0.5;
-}
-
-float getLuma(vec3 c) {
-  return dot(c, vec3(0.2126, 0.7152, 0.0722));
-}
-
-float sampleWeightCurve(float t) {
-  if (u_weightCurveLen <= 1) return t;
-  float idx = clamp(t, 0.0, 1.0) * float(u_weightCurveLen - 1);
-  int i0 = int(idx);
-  int i1 = min(i0 + 1, u_weightCurveLen - 1);
-  float frac = idx - float(i0);
-  return mix(u_weightCurve[i0], u_weightCurve[i1], frac);
-}
-
-float getPixelWeight(vec3 histPixel, float baseWeight) {
-  if (u_weightMode == 0) return baseWeight; // uniform
-  float luma = getLuma(histPixel);
-  float rawVal = 0.0;
-  if (u_weightMode == 1) rawVal = luma;           // luminance
-  else if (u_weightMode == 2) rawVal = 1.0 - luma; // darkness
-  else rawVal = 1.0; // motion: handled outside
-  float curveVal = sampleWeightCurve(rawVal);
-  return baseWeight * curveVal;
-}
-
-// Compute how much a pixel at uv is inside the mask (0=outside, 1=inside)
-float getMaskAlpha(vec2 uv) {
-  if (!u_excludeMask) return 0.0;
-  vec4 mask = texture(u_maskTex, uv);
-  float alpha = 0.0;
-  for (int i = 0; i < 5; i++) {
-    if (i >= u_numMaskExcludeColors) break;
-    float luma = dot(mask.rgb, vec3(0.3333));
-    float maskDiff = dot(abs(mask.rgb - u_maskExcludeColors[i]), vec3(1.0));
-    float maskAlpha = (1.0 - smoothstep(0.0, 1.0, maskDiff)) * smoothstep(0.15, 0.25, luma);
-    alpha = max(alpha, maskAlpha);
-  }
-  return alpha;
-}
-
-void main() {
-  vec2 uv = v_texCoord;
-  vec4 current = texture(u_current, uv);
-
-  if (u_numHistory == 0 || u_blendStrength < 0.001) {
-    fragColor = current;
-    return;
-  }
-
-  // Motion weight: per-pixel frame difference
-  float motionWeight = 1.0;
-  if (u_weightMode == 3) {
-    vec4 prev = texture(u_prevFrame, uv);
-    vec3 diff = abs(current.rgb - prev.rgb);
-    motionWeight = clamp(getLuma(diff) * 4.0, 0.0, 1.0);
-    motionWeight = smoothstep(0.05, 0.5, motionWeight);
-  }
-
-  // Accumulate history from atlas
-  // u_histWeights is indexed by atlas SLOT (not recency), pre-sorted by CPU
-  vec3 accum = vec3(0.0);
-  float totalWeight = 0.0;
-
-  for (int i = 0; i < MAX_HISTORY; i++) {
-    float hw = u_histWeights[i];
-    if (hw < 0.001) continue;
-
-    vec3 histColor = sampleHistory(i, uv).rgb;
-    float pw = getPixelWeight(histColor, hw);
-    if (u_weightMode == 3) pw *= motionWeight;
-
-    accum += histColor * pw;
-    totalWeight += pw;
-  }
-
-  if (totalWeight < 0.001) {
-    fragColor = current;
-    return;
-  }
-
-  // Blend
-  vec3 blended;
-  if (u_blendMode == 5) { // average
-    blended = accum / totalWeight;
-  } else {
-    accum = clamp(accum / max(totalWeight, 1.0), 0.0, 1.0);
-    if      (u_blendMode == 0) blended = blendScreen(current.rgb, accum);
-    else if (u_blendMode == 1) blended = blendAdd(current.rgb, accum);
-    else if (u_blendMode == 2) blended = blendMultiply(current.rgb, accum);
-    else if (u_blendMode == 3) blended = blendOverlay(current.rgb, accum);
-    else if (u_blendMode == 4) blended = blendDifference(current.rgb, accum);
-    else                        blended = blendAverage(current.rgb, accum);
-  }
-
-  // If mask exclusion is on, blend back to current in the masked region
-  float maskExclusion = getMaskAlpha(uv);
-  vec3 result = mix(mix(current.rgb, blended, u_blendStrength), current.rgb, maskExclusion);
-
-  // Chromatic aberration: R samples from chromR-offset frame, B from chromB-offset frame
-  float r = result.r;
-  float b = result.b;
-
-  // u_chromR and u_chromB are atlas slot indices (pre-computed by CPU)
-  if (u_chromR >= 0) {
-    float rSample = sampleHistory(u_chromR, uv).r;
-    r = mix(mix(result.r, rSample, u_blendStrength * 0.7), current.r, maskExclusion);
-  }
-  if (u_chromB >= 0) {
-    float bSample = sampleHistory(u_chromB, uv).b;
-    b = mix(mix(result.b, bSample, u_blendStrength * 0.7), current.b, maskExclusion);
-  }
-
-  fragColor = vec4(r, result.g, b, current.a);
-}
-`;
-
-// ─── Mask Extract + Subject Overlay Shader ───────────────────────────────────
-export const OVERLAY_SHADER = `#version 300 es
-precision highp float;
-
-#define MAX_COLORS 5
-
-in vec2 v_texCoord;
-out vec4 fragColor;
-
-uniform sampler2D u_fxOutput;
-uniform sampler2D u_baseVideo;
-uniform sampler2D u_maskVideo;
-uniform bool u_hasMask;
-uniform vec3 u_maskColors[MAX_COLORS];
-uniform int u_numMaskColors; // active count (1..5)
-uniform int u_debugView;    // 0=normal, 1=subject only, 2=background only
-
-vec4 unpremult(vec4 color) {
-  if (color.a < 0.0001) return vec4(0.0);
-  return vec4(clamp(color.rgb / color.a, vec3(0.0), vec3(1.0)), color.a);
-}
-
-void main() {
-  vec2 uv = v_texCoord;
-  vec4 fxBg = texture(u_fxOutput, uv);
-
-  if (!u_hasMask) {
-    fragColor = fxBg;
-    return;
-  }
-
-  vec4 base = texture(u_baseVideo, uv);
-  vec4 mask = texture(u_maskVideo, uv);
-
-  float alpha = 0.0;
-  for (int i = 0; i < MAX_COLORS; i++) {
-    if (i >= u_numMaskColors) break;
-    float luma = dot(mask.rgb, vec3(0.3333));
-    float maskDiff = dot(abs(mask.rgb - u_maskColors[i]), vec3(1.0));
-    float maskAlpha = (1.0 - smoothstep(0.0, 1.0, maskDiff)) * smoothstep(0.15, 0.25, luma);
-    alpha = max(alpha, maskAlpha);
-  }
-
-  alpha = min(base.a, alpha);
-  vec4 subject = vec4(unpremult(base).rgb * alpha, alpha);
-
-  // Debug views
-  if (u_debugView == 1) {
-    // Subject only: show subject over black
-    fragColor = vec4(subject.rgb, subject.a);
-    return;
-  }
-  if (u_debugView == 2) {
-    // Background only: show fx background, zero out subject region
-    fragColor = vec4(fxBg.rgb * (1.0 - subject.a), fxBg.a * (1.0 - subject.a));
-    return;
-  }
-
-  vec3 outRgb = subject.rgb + fxBg.rgb * (1.0 - subject.a);
-  float outA = subject.a + fxBg.a * (1.0 - subject.a);
-  fragColor = vec4(outRgb, outA);
-}
-`;
-
 // ─── Passthrough ─────────────────────────────────────────────────────────────
+// Used to display a single texture directly (e.g. Raw Input view).
 export const PASSTHROUGH_SHADER = `#version 300 es
 precision highp float;
 in vec2 v_texCoord;
@@ -284,5 +21,142 @@ out vec4 fragColor;
 uniform sampler2D u_texture;
 void main() {
   fragColor = texture(u_texture, v_texCoord);
+}
+`;
+
+// ─── Subject Extraction Shader ───────────────────────────────────────────────
+// Inputs:
+//   u_baseVideo  — the original base video frame (subject + background)
+//   u_maskVideo  — the mask video frame (colored regions define subject area)
+//
+// The mask is keyed by color: pixels in u_maskVideo that match any of the
+// u_maskColors[i] entries (within the tolerance defined by u_edgeSoftness)
+// are treated as "subject present". The resulting alpha is applied to u_baseVideo.
+//
+// View modes:
+//   0 = Normal:     subject composited over base background
+//   1 = Subject:    extracted subject over black (alpha preserved)
+//   2 = Background: base frame with subject region zeroed out
+//
+// Spill suppression: when u_spillSuppression is true, pixels near the mask
+// color boundary have their saturation reduced proportionally to how close
+// they are to the key color, removing color fringing on subject edges.
+export const SUBJECT_SHADER = `#version 300 es
+precision highp float;
+
+#define MAX_COLORS 5
+
+in vec2 v_texCoord;
+out vec4 fragColor;
+
+uniform sampler2D u_baseVideo;
+uniform sampler2D u_maskVideo;
+
+// Mask key colors (up to MAX_COLORS active)
+uniform vec3 u_maskColors[MAX_COLORS];
+uniform int u_numMaskColors;
+
+// Keying quality controls
+uniform float u_edgeSoftness;   // color-distance falloff upper bound (0.1..2.0)
+uniform float u_minLuma;        // minimum mask luma to count as mask (0..0.5)
+
+// Spill suppression
+uniform bool u_spillSuppression;
+uniform float u_spillStrength;
+
+// View mode: 0=normal, 1=subject only, 2=background only
+uniform int u_viewMode;
+
+// ─── Helpers ─────────────────────────────────────────────────────────────────
+
+vec4 unpremult(vec4 color) {
+  if (color.a < 0.0001) return vec4(0.0);
+  return vec4(clamp(color.rgb / color.a, vec3(0.0), vec3(1.0)), color.a);
+}
+
+float getLuma(vec3 c) {
+  return dot(c, vec3(0.2126, 0.7152, 0.0722));
+}
+
+// Convert RGB to HSL saturation (0..1)
+float getSaturation(vec3 c) {
+  float maxC = max(max(c.r, c.g), c.b);
+  float minC = min(min(c.r, c.g), c.b);
+  float delta = maxC - minC;
+  if (maxC < 0.0001) return 0.0;
+  return delta / maxC;
+}
+
+// Desaturate a color toward its luma value by amount t (0=no change, 1=full grey)
+vec3 desaturate(vec3 c, float t) {
+  float luma = getLuma(c);
+  return mix(c, vec3(luma), t);
+}
+
+// ─── Main ─────────────────────────────────────────────────────────────────────
+
+void main() {
+  vec2 uv = v_texCoord;
+  vec4 base = texture(u_baseVideo, uv);
+  vec4 mask = texture(u_maskVideo, uv);
+
+  // Compute mask alpha: maximum match across all active key colors
+  float alpha = 0.0;
+  float closestDist = 999.0;
+
+  for (int i = 0; i < MAX_COLORS; i++) {
+    if (i >= u_numMaskColors) break;
+
+    float luma = getLuma(mask.rgb);
+    float maskDiff = length(mask.rgb - u_maskColors[i]);
+
+    // Luma gate: ignore very dark mask pixels (shadows, black borders)
+    float lumaGate = smoothstep(u_minLuma, u_minLuma + 0.1, luma);
+
+    // Color match: 1.0 = perfect match, 0.0 = no match
+    // u_edgeSoftness controls how wide the tolerance is
+    float colorMatch = (1.0 - smoothstep(0.0, u_edgeSoftness, maskDiff)) * lumaGate;
+
+    if (maskDiff < closestDist) closestDist = maskDiff;
+    alpha = max(alpha, colorMatch);
+  }
+
+  // Clamp alpha to base pixel's own alpha (handles pre-multiplied sources)
+  alpha = min(base.a, alpha);
+
+  // Spill suppression: desaturate base pixels near the key color boundary
+  vec3 baseRgb = unpremult(base).rgb;
+  if (u_spillSuppression) {
+    // Spill proximity: how close the base pixel is to any key color
+    float spillProximity = 1.0 - clamp(closestDist / u_edgeSoftness, 0.0, 1.0);
+    // Only suppress on the fringe (alpha between 0.05 and 0.7)
+    float fringeMask = smoothstep(0.05, 0.2, alpha) * (1.0 - smoothstep(0.5, 0.7, alpha));
+    float suppressAmount = spillProximity * fringeMask * u_spillStrength;
+    baseRgb = desaturate(baseRgb, suppressAmount);
+  }
+
+  vec4 subject = vec4(baseRgb * alpha, alpha);
+
+  // ─── View modes ───────────────────────────────────────────────────────────
+
+  if (u_viewMode == 1) {
+    // Subject only: extracted subject over black
+    fragColor = vec4(subject.rgb, subject.a);
+    return;
+  }
+
+  if (u_viewMode == 2) {
+    // Background only: base frame with subject region removed
+    vec3 bgRgb = unpremult(base).rgb;
+    float bgAlpha = base.a * (1.0 - alpha);
+    fragColor = vec4(bgRgb * bgAlpha, bgAlpha);
+    return;
+  }
+
+  // Normal: subject composited over base background
+  vec3 bgRgb = unpremult(base).rgb;
+  vec3 outRgb = subject.rgb + bgRgb * base.a * (1.0 - alpha);
+  float outA = alpha + base.a * (1.0 - alpha);
+  fragColor = vec4(outRgb, outA);
 }
 `;

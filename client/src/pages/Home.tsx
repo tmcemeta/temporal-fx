@@ -1,7 +1,7 @@
-// TEMPORAL FX — Main Page
+// SIMPLE SUBJECT — Main Page
 // "Cinematic Void" design: full-height two-column layout.
 // Left: VideoPreview (WebGL canvas + playback controls)
-// Right: ControlPanel (all FX parameters)
+// Right: ControlPanel (subject extraction controls only)
 //
 // Video format: a single hstack-encoded file produced by:
 //   ffmpeg -y -i "$BASE_VIDEO" -i "$MASK_VIDEO" -filter_complex hstack "$OUTPUT_VIDEO"
@@ -9,20 +9,19 @@
 // A single decoder guarantees lockstep playback — no drift correction needed.
 
 import React, { useState, useCallback, useRef } from "react";
-import type { FXState } from "@/lib/types";
+import type { SubjectState } from "@/lib/types";
 import { DEFAULT_STATE } from "@/lib/types";
 import VideoPreview from "@/components/VideoPreview";
 import ControlPanel from "@/components/ControlPanel";
 
 export default function Home() {
-  const [state, setState] = useState<FXState>(DEFAULT_STATE);
+  const [state, setState] = useState<SubjectState>(DEFAULT_STATE);
   const [videoUrl, setVideoUrl] = useState<string | null>(null);
   const [videoFileName, setVideoFileName] = useState("");
-  const [bufferWarmup, setBufferWarmup] = useState(1);
 
   const videoInputRef = useRef<HTMLInputElement>(null);
 
-  const handleStateChange = useCallback((patch: Partial<FXState>) => {
+  const handleStateChange = useCallback((patch: Partial<SubjectState>) => {
     setState(prev => ({ ...prev, ...patch }));
   }, []);
 
@@ -58,7 +57,6 @@ export default function Home() {
       <VideoPreview
         videoUrl={videoUrl}
         state={state}
-        onBufferWarmup={setBufferWarmup}
         onDropVideo={handleDropVideo}
       />
 
@@ -69,7 +67,6 @@ export default function Home() {
         onLoadVideo={handleLoadVideo}
         hasVideo={!!videoUrl}
         videoFileName={videoFileName}
-        bufferWarmup={bufferWarmup}
       />
 
       {/* Hidden file input */}

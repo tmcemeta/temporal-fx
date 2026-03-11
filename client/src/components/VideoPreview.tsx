@@ -1,27 +1,24 @@
-// TEMPORAL FX — VideoPreview Component
+// SIMPLE SUBJECT — VideoPreview Component
 // Hosts the WebGL canvas, a single hidden video element, and playback controls.
 // Runs the render loop via requestAnimationFrame.
 //
 // Video format: hstack-encoded (base = left half, mask = right half).
 // A single <video> element decodes both halves in lockstep — no drift is possible.
-// The engine receives the video element and the logical frame width (videoWidth / 2);
-// it uses UNPACK_ROW_LENGTH / UNPACK_SKIP_PIXELS to upload each half independently.
 
 import React, { useRef, useEffect, useCallback, useState } from "react";
-import type { FXState } from "@/lib/types";
-import { TemporalFXEngine } from "@/lib/webglEngine";
+import type { SubjectState } from "@/lib/types";
+import { SubjectEngine } from "@/lib/subjectEngine";
 
 interface Props {
   videoUrl: string | null;
-  state: FXState;
-  onBufferWarmup: (ratio: number) => void;
+  state: SubjectState;
   onDropVideo?: (file: File) => void;
 }
 
-export default function VideoPreview({ videoUrl, state, onBufferWarmup, onDropVideo }: Props) {
+export default function VideoPreview({ videoUrl, state, onDropVideo }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
-  const engineRef = useRef<TemporalFXEngine | null>(null);
+  const engineRef = useRef<SubjectEngine | null>(null);
   const rafRef = useRef<number>(0);
   const stateRef = useRef(state);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -32,11 +29,9 @@ export default function VideoPreview({ videoUrl, state, onBufferWarmup, onDropVi
   const [duration, setDuration] = useState(0);
   const [isLooping, setIsLooping] = useState(true);
 
-  // Use a ref for logical frame dimensions to avoid stale closures in the render loop.
-  // For an hstack video, logicalWidth = videoWidth / 2, logicalHeight = videoHeight.
   const frameDimsRef = useRef({ w: 0, h: 0 });
   const prevIsHstackRef = useRef<boolean | undefined>(undefined);
-  const [videoSize, setVideoSize] = useState({ w: 0, h: 0 }); // for aspect ratio display only
+  const [videoSize, setVideoSize] = useState({ w: 0, h: 0 });
 
   // Keep stateRef in sync without triggering re-renders
   useEffect(() => { stateRef.current = state; }, [state]);
@@ -46,7 +41,7 @@ export default function VideoPreview({ videoUrl, state, onBufferWarmup, onDropVi
     const canvas = canvasRef.current;
     if (!canvas) return;
     try {
-      engineRef.current = new TemporalFXEngine(canvas);
+      engineRef.current = new SubjectEngine(canvas);
     } catch (e) {
       console.error("WebGL init failed:", e);
     }
@@ -65,10 +60,10 @@ export default function VideoPreview({ videoUrl, state, onBufferWarmup, onDropVi
       return;
     }
 
-    // Use isHstack from state to determine if video is side-by-side format
-    const isHstack = stateRef.current.isHstack ?? false;
+    const s = stateRef.current;
+    const isHstack = s.isHstack;
 
-    // Reset frame dimensions when isHstack changes to force a resize
+    // Reset frame dimensions when isHstack changes
     if (prevIsHstackRef.current !== undefined && prevIsHstackRef.current !== isHstack) {
       frameDimsRef.current = { w: 0, h: 0 };
     }
@@ -77,27 +72,17 @@ export default function VideoPreview({ videoUrl, state, onBufferWarmup, onDropVi
     const fw = Math.floor(isHstack ? video.videoWidth / 2 : video.videoWidth) || 320;
     const fh = video.videoHeight || 240;
 
-    // Resize (and clear history) only when logical dimensions change
     if (fw !== frameDimsRef.current.w || fh !== frameDimsRef.current.h) {
       frameDimsRef.current = { w: fw, h: fh };
       setVideoSize({ w: fw, h: fh });
       engine.resize(fw, fh);
     }
 
-    engine.renderFrame(video, stateRef.current, isHstack);
-
-    // Update buffer warmup indicator
-    const depth = stateRef.current.historyDepth;
-    if (depth > 0) {
-      onBufferWarmup(Math.min(engine.historyFilled / depth, 1));
-    } else {
-      onBufferWarmup(1);
-    }
-
+    engine.renderFrame(video, s);
     setCurrentTime(video.currentTime);
 
     rafRef.current = requestAnimationFrame(renderLoop);
-  }, [onBufferWarmup]);
+  }, []);
 
   useEffect(() => {
     rafRef.current = requestAnimationFrame(renderLoop);
@@ -119,9 +104,7 @@ export default function VideoPreview({ videoUrl, state, onBufferWarmup, onDropVi
       video.src = "";
       setDuration(0);
     }
-    // Reset dims ref so resize fires on the new video's first frame
     frameDimsRef.current = { w: 0, h: 0 };
-    engineRef.current?.clearHistory();
   }, [videoUrl]);
 
   // Keyboard shortcut: spacebar = play/pause
@@ -136,24 +119,10 @@ export default function VideoPreview({ videoUrl, state, onBufferWarmup, onDropVi
     return () => window.removeEventListener("keydown", onKey);
   }, [isPlaying]);
 
-  // Clear history on seek — temporal continuity is broken by any time jump
-  useEffect(() => {
-    const video = videoRef.current;
-    if (!video || !videoUrl) return;
-    const onSeeked = () => {
-      engineRef.current?.clearHistory();
-    };
-    video.addEventListener("seeked", onSeeked);
-    return () => video.removeEventListener("seeked", onSeeked);
-  }, [videoUrl]);
-
   const handleScrub = (e: React.ChangeEvent<HTMLInputElement>) => {
     const t = parseFloat(e.target.value);
     const video = videoRef.current;
-    if (video) {
-      video.currentTime = t;
-      engineRef.current?.clearHistory();
-    }
+    if (video) video.currentTime = t;
   };
 
   const togglePlay = () => {
@@ -182,7 +151,6 @@ export default function VideoPreview({ videoUrl, state, onBufferWarmup, onDropVi
     return `${m}:${s.toString().padStart(2, "0")}.${f.toString().padStart(2, "0")}`;
   };
 
-  // Compute display aspect ratio from logical (single-half) dimensions
   const aspectRatio = videoSize.h > 0 ? videoSize.w / videoSize.h : 16 / 9;
 
   return (
@@ -245,8 +213,6 @@ export default function VideoPreview({ videoUrl, state, onBufferWarmup, onDropVi
           style={{
             maxWidth: "100%",
             maxHeight: "100%",
-            // CSS aspect-ratio keeps the canvas display size correct regardless
-            // of the backing pixel dimensions set by the engine.
             aspectRatio: `${aspectRatio}`,
             display: videoUrl ? "block" : "none",
             imageRendering: "pixelated",
@@ -329,7 +295,7 @@ export default function VideoPreview({ videoUrl, state, onBufferWarmup, onDropVi
         </button>
       </div>
 
-      {/* Single hidden video element — decodes the full hstack stream */}
+      {/* Single hidden video element */}
       <video
         ref={videoRef}
         loop={isLooping}
