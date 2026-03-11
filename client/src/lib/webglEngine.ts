@@ -236,9 +236,18 @@ export class TemporalFXEngine {
     const ctx = this.splitCtx;
     if (!ctx) return;
 
-    const drawX = isLeft ? 0 : -this.width;
+    // The hstack video is 2*frameWidth wide. We use the 9-argument drawImage
+    // overload to crop exactly one half from the source:
+    //   sx = 0           (base, left half)
+    //   sx = frameWidth  (mask, right half)
+    // The destination is always the full splitCanvas (0, 0, frameWidth, frameHeight).
+    const sx = isLeft ? 0 : this.width;
     ctx.clearRect(0, 0, this.width, this.height);
-    ctx.drawImage(video, drawX, 0);
+    ctx.drawImage(
+      video,
+      sx, 0, this.width, this.height,   // source rect
+      0,  0, this.width, this.height,   // dest rect
+    );
 
     gl.bindTexture(gl.TEXTURE_2D, tex);
     gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, gl.RGBA, gl.UNSIGNED_BYTE, this.splitCanvas!);
