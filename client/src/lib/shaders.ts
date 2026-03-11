@@ -370,3 +370,62 @@ void main() {
   fragColor = vec4(result, original.a);
 }
 `;
+
+// ─── Halation Shaders ────────────────────────────────────────────────────────
+
+// Halation bright pass: extract bright pixels and tint toward warm color
+// Simulates light scattering through film emulsion layer
+export const HALATION_BRIGHT_PASS_SHADER = `#version 300 es
+precision highp float;
+
+in vec2 v_texCoord;
+out vec4 fragColor;
+
+uniform sampler2D u_source;
+uniform float u_threshold;
+uniform vec3 u_tint;
+uniform float u_tintStrength;
+
+float getLuma(vec3 c) {
+  return dot(c, vec3(0.2126, 0.7152, 0.0722));
+}
+
+void main() {
+  vec4 color = texture(u_source, v_texCoord);
+  float luma = getLuma(color.rgb);
+
+  // Soft threshold with smooth falloff
+  float brightness = max(0.0, luma - u_threshold);
+  float contribution = brightness / (brightness + 1.0);
+
+  // Tint the bright pixels toward the warm color
+  // Mix between original color and tint based on tintStrength
+  vec3 tinted = mix(color.rgb, u_tint * luma, u_tintStrength);
+
+  fragColor = vec4(tinted * contribution, color.a);
+}
+`;
+
+// Halation composite: screen blend for more natural film look
+export const HALATION_COMPOSITE_SHADER = `#version 300 es
+precision highp float;
+
+in vec2 v_texCoord;
+out vec4 fragColor;
+
+uniform sampler2D u_original;
+uniform sampler2D u_halation;
+uniform float u_intensity;
+
+void main() {
+  vec4 original = texture(u_original, v_texCoord);
+  vec4 halation = texture(u_halation, v_texCoord);
+
+  // Screen blend for more natural film look
+  // result = 1 - (1 - original) * (1 - halation * intensity)
+  vec3 halationScaled = halation.rgb * u_intensity;
+  vec3 result = 1.0 - (1.0 - original.rgb) * (1.0 - halationScaled);
+
+  fragColor = vec4(result, original.a);
+}
+`;

@@ -32,6 +32,8 @@ import {
   BRIGHT_PASS_SHADER,
   BLUR_SHADER,
   BLOOM_COMPOSITE_SHADER,
+  HALATION_BRIGHT_PASS_SHADER,
+  HALATION_COMPOSITE_SHADER,
   MAX_HISTORY,
   ATLAS_COLS,
   ATLAS_ROWS,
@@ -82,6 +84,8 @@ export class TemporalFXEngine {
   private brightPassProgram!: Program;
   private blurProgram!: Program;
   private bloomCompositeProgram!: Program;
+  private halationBrightPassProgram!: Program;
+  private halationCompositeProgram!: Program;
   private halfWidth = 0;
   private halfHeight = 0;
 
@@ -156,6 +160,14 @@ for (let i = 0; i < 5; i++) {
 
     this.bloomCompositeProgram = this.createProgram(VERTEX_SHADER, BLOOM_COMPOSITE_SHADER, [
       "u_original", "u_bloom", "u_intensity",
+    ]);
+
+    this.halationBrightPassProgram = this.createProgram(VERTEX_SHADER, HALATION_BRIGHT_PASS_SHADER, [
+      "u_source", "u_threshold", "u_tint", "u_tintStrength",
+    ]);
+
+    this.halationCompositeProgram = this.createProgram(VERTEX_SHADER, HALATION_COMPOSITE_SHADER, [
+      "u_original", "u_halation", "u_intensity",
     ]);
 
     this.quadBuffer = this.createQuadBuffer();
@@ -570,13 +582,20 @@ console.log(`[TemporalFX] Frame: ${width}x${height}, Atlas: ${atlasW}x${atlasH} 
   /**
    * Run post-processing effects chain.
    * Returns the texture to use as input to the overlay pass.
+   *
+   * Flow:
+   * 1. Copy compositeTexture → postFxA
+   * 2. If bloom.enabled: bright-pass → blur → bloom composite → swap (postFxA ↔ postFxB)
+   * 3. If halation.enabled: halation bright-pass → blur → halation composite → swap
+   * 4. Return postFxA (or compositeTexture if nothing enabled)
    */
   private runPostFX(postFX: PostFXState): WebGLTexture {
     const gl = this.gl;
     const bloom = postFX.bloom;
+    const halation = postFX.halation;
 
     // If no effects enabled, return compositeTexture directly
-    if (!bloom.enabled) {
+    if (!bloom.enabled && !halation.enabled) {
       return this.compositeTexture;
     }
 
@@ -594,65 +613,144 @@ console.log(`[TemporalFX] Frame: ${width}x${height}, Atlas: ${atlasW}x${atlasH} 
     );
     gl.bindFramebuffer(gl.READ_FRAMEBUFFER, null);
 
-    // b. Bright-pass: postFxA → blurPongHalf (half-res viewport for implicit downsample)
-    gl.bindFramebuffer(gl.FRAMEBUFFER, this.postFxFBO);
-    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, this.blurPongHalf, 0);
-    gl.viewport(0, 0, this.halfWidth, this.halfHeight);
-    gl.useProgram(this.brightPassProgram.program);
-    this.bindQuad(this.brightPassProgram);
+    // Track which texture has current result (start with postFxA)
+    let currentTex = this.postFxA;
+    let targetTex = this.postFxB;
 
-    gl.activeTexture(gl.TEXTURE0);
-    gl.bindTexture(gl.TEXTURE_2D, this.postFxA);
-    gl.uniform1i(this.brightPassProgram.uniforms["u_source"], 0);
-    gl.uniform1f(this.brightPassProgram.uniforms["u_threshold"], bloom.threshold);
+    // ─── BLOOM PASS ──────────────────────────────────────────────────────────
+    if (bloom.enabled) {
+      // b. Bright-pass: currentTex → blurPongHalf (half-res viewport for implicit downsample)
+      gl.bindFramebuffer(gl.FRAMEBUFFER, this.postFxFBO);
+      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, this.blurPongHalf, 0);
+      gl.viewport(0, 0, this.halfWidth, this.halfHeight);
+      gl.useProgram(this.brightPassProgram.program);
+      this.bindQuad(this.brightPassProgram);
 
-    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+      gl.activeTexture(gl.TEXTURE0);
+      gl.bindTexture(gl.TEXTURE_2D, currentTex);
+      gl.uniform1i(this.brightPassProgram.uniforms["u_source"], 0);
+      gl.uniform1f(this.brightPassProgram.uniforms["u_threshold"], bloom.threshold);
 
-    // c. H-blur: blurPongHalf → blurPingHalf
-    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, this.blurPingHalf, 0);
-    gl.useProgram(this.blurProgram.program);
-    this.bindQuad(this.blurProgram);
+      gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
 
-    gl.activeTexture(gl.TEXTURE0);
-    gl.bindTexture(gl.TEXTURE_2D, this.blurPongHalf);
-    gl.uniform1i(this.blurProgram.uniforms["u_source"], 0);
-    gl.uniform2f(this.blurProgram.uniforms["u_direction"], 1.0, 0.0);
-    gl.uniform1f(this.blurProgram.uniforms["u_radius"], bloom.radius);
-    gl.uniform2f(this.blurProgram.uniforms["u_texelSize"], 1.0 / this.halfWidth, 1.0 / this.halfHeight);
+      // c. H-blur: blurPongHalf → blurPingHalf
+      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, this.blurPingHalf, 0);
+      gl.useProgram(this.blurProgram.program);
+      this.bindQuad(this.blurProgram);
 
-    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+      gl.activeTexture(gl.TEXTURE0);
+      gl.bindTexture(gl.TEXTURE_2D, this.blurPongHalf);
+      gl.uniform1i(this.blurProgram.uniforms["u_source"], 0);
+      gl.uniform2f(this.blurProgram.uniforms["u_direction"], 1.0, 0.0);
+      gl.uniform1f(this.blurProgram.uniforms["u_radius"], bloom.radius);
+      gl.uniform2f(this.blurProgram.uniforms["u_texelSize"], 1.0 / this.halfWidth, 1.0 / this.halfHeight);
 
-    // d. V-blur: blurPingHalf → blurPongHalf
-    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, this.blurPongHalf, 0);
+      gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
 
-    gl.activeTexture(gl.TEXTURE0);
-    gl.bindTexture(gl.TEXTURE_2D, this.blurPingHalf);
-    gl.uniform1i(this.blurProgram.uniforms["u_source"], 0);
-    gl.uniform2f(this.blurProgram.uniforms["u_direction"], 0.0, 1.0);
+      // d. V-blur: blurPingHalf → blurPongHalf
+      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, this.blurPongHalf, 0);
 
-    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+      gl.activeTexture(gl.TEXTURE0);
+      gl.bindTexture(gl.TEXTURE_2D, this.blurPingHalf);
+      gl.uniform1i(this.blurProgram.uniforms["u_source"], 0);
+      gl.uniform2f(this.blurProgram.uniforms["u_direction"], 0.0, 1.0);
 
-    // e. Bloom composite: postFxA + blurPongHalf → postFxB
-    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, this.postFxB, 0);
-    gl.viewport(0, 0, this.width, this.height);
-    gl.useProgram(this.bloomCompositeProgram.program);
-    this.bindQuad(this.bloomCompositeProgram);
+      gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
 
-    gl.activeTexture(gl.TEXTURE0);
-    gl.bindTexture(gl.TEXTURE_2D, this.postFxA);
-    gl.uniform1i(this.bloomCompositeProgram.uniforms["u_original"], 0);
+      // e. Bloom composite: currentTex + blurPongHalf → targetTex
+      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, targetTex, 0);
+      gl.viewport(0, 0, this.width, this.height);
+      gl.useProgram(this.bloomCompositeProgram.program);
+      this.bindQuad(this.bloomCompositeProgram);
 
-    gl.activeTexture(gl.TEXTURE1);
-    gl.bindTexture(gl.TEXTURE_2D, this.blurPongHalf);
-    gl.uniform1i(this.bloomCompositeProgram.uniforms["u_bloom"], 1);
+      gl.activeTexture(gl.TEXTURE0);
+      gl.bindTexture(gl.TEXTURE_2D, currentTex);
+      gl.uniform1i(this.bloomCompositeProgram.uniforms["u_original"], 0);
 
-    gl.uniform1f(this.bloomCompositeProgram.uniforms["u_intensity"], bloom.intensity);
+      gl.activeTexture(gl.TEXTURE1);
+      gl.bindTexture(gl.TEXTURE_2D, this.blurPongHalf);
+      gl.uniform1i(this.bloomCompositeProgram.uniforms["u_bloom"], 1);
 
-    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+      gl.uniform1f(this.bloomCompositeProgram.uniforms["u_intensity"], bloom.intensity);
+
+      gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+
+      // Swap textures so currentTex has bloom result
+      const temp = currentTex;
+      currentTex = targetTex;
+      targetTex = temp;
+    }
+
+    // ─── HALATION PASS ───────────────────────────────────────────────────────
+    if (halation.enabled) {
+      // a. Halation bright-pass (with tint): currentTex → blurPongHalf
+      gl.bindFramebuffer(gl.FRAMEBUFFER, this.postFxFBO);
+      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, this.blurPongHalf, 0);
+      gl.viewport(0, 0, this.halfWidth, this.halfHeight);
+      gl.useProgram(this.halationBrightPassProgram.program);
+      this.bindQuad(this.halationBrightPassProgram);
+
+      gl.activeTexture(gl.TEXTURE0);
+      gl.bindTexture(gl.TEXTURE_2D, currentTex);
+      gl.uniform1i(this.halationBrightPassProgram.uniforms["u_source"], 0);
+      gl.uniform1f(this.halationBrightPassProgram.uniforms["u_threshold"], halation.threshold);
+      gl.uniform3f(this.halationBrightPassProgram.uniforms["u_tint"],
+        halation.tint.r, halation.tint.g, halation.tint.b);
+      gl.uniform1f(this.halationBrightPassProgram.uniforms["u_tintStrength"], 0.85);
+
+      gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+
+      // b. H-blur: blurPongHalf → blurPingHalf
+      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, this.blurPingHalf, 0);
+      gl.useProgram(this.blurProgram.program);
+      this.bindQuad(this.blurProgram);
+
+      gl.activeTexture(gl.TEXTURE0);
+      gl.bindTexture(gl.TEXTURE_2D, this.blurPongHalf);
+      gl.uniform1i(this.blurProgram.uniforms["u_source"], 0);
+      gl.uniform2f(this.blurProgram.uniforms["u_direction"], 1.0, 0.0);
+      gl.uniform1f(this.blurProgram.uniforms["u_radius"], halation.radius);
+      gl.uniform2f(this.blurProgram.uniforms["u_texelSize"], 1.0 / this.halfWidth, 1.0 / this.halfHeight);
+
+      gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+
+      // c. V-blur: blurPingHalf → blurPongHalf
+      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, this.blurPongHalf, 0);
+
+      gl.activeTexture(gl.TEXTURE0);
+      gl.bindTexture(gl.TEXTURE_2D, this.blurPingHalf);
+      gl.uniform1i(this.blurProgram.uniforms["u_source"], 0);
+      gl.uniform2f(this.blurProgram.uniforms["u_direction"], 0.0, 1.0);
+
+      gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+
+      // d. Halation composite (screen blend): currentTex + blurPongHalf → targetTex
+      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, targetTex, 0);
+      gl.viewport(0, 0, this.width, this.height);
+      gl.useProgram(this.halationCompositeProgram.program);
+      this.bindQuad(this.halationCompositeProgram);
+
+      gl.activeTexture(gl.TEXTURE0);
+      gl.bindTexture(gl.TEXTURE_2D, currentTex);
+      gl.uniform1i(this.halationCompositeProgram.uniforms["u_original"], 0);
+
+      gl.activeTexture(gl.TEXTURE1);
+      gl.bindTexture(gl.TEXTURE_2D, this.blurPongHalf);
+      gl.uniform1i(this.halationCompositeProgram.uniforms["u_halation"], 1);
+
+      gl.uniform1f(this.halationCompositeProgram.uniforms["u_intensity"], halation.intensity);
+
+      gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+
+      // Swap textures so currentTex has halation result
+      const temp = currentTex;
+      currentTex = targetTex;
+      targetTex = temp;
+    }
 
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
 
-    return this.postFxB;
+    return currentTex;
   }
 
 dispose() {
@@ -662,6 +760,8 @@ dispose() {
     gl.deleteProgram(this.brightPassProgram.program);
     gl.deleteProgram(this.blurProgram.program);
     gl.deleteProgram(this.bloomCompositeProgram.program);
+    gl.deleteProgram(this.halationBrightPassProgram.program);
+    gl.deleteProgram(this.halationCompositeProgram.program);
     gl.deleteTexture(this.atlasOriginal);
     gl.deleteTexture(this.atlasProcessed);
     gl.deleteTexture(this.baseFrameTexture);

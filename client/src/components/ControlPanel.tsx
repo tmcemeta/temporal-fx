@@ -7,7 +7,7 @@
 // compositing in the overlay shader, which still operates on the mask half.
 
 import React, { useRef } from "react";
-import type { FXState, BlendMode, PixelWeightMode, PostFXState, BloomState } from "@/lib/types";
+import type { FXState, BlendMode, PixelWeightMode, RGBColor } from "@/lib/types";
 import { DEFAULT_STATE, PRESETS } from "@/lib/types";
 import BezierEditor from "./BezierEditor";
 import MaskColorPicker from "./MaskColorPicker";
@@ -94,6 +94,23 @@ function SliderRow({
   );
 }
 
+function rgbToHex(color: RGBColor): string {
+  const r = Math.round(color.r * 255).toString(16).padStart(2, '0');
+  const g = Math.round(color.g * 255).toString(16).padStart(2, '0');
+  const b = Math.round(color.b * 255).toString(16).padStart(2, '0');
+  return `#${r}${g}${b}`;
+}
+
+function hexToRgb(hex: string): RGBColor {
+  const result = /^#?([a-f\d]{2})([a-f\d]{2})([a-f\d]{2})$/i.exec(hex);
+  if (!result) return { r: 1, g: 0.4, b: 0.2 };
+  return {
+    r: parseInt(result[1], 16) / 255,
+    g: parseInt(result[2], 16) / 255,
+    b: parseInt(result[3], 16) / 255,
+  };
+}
+
 export default function ControlPanel({
   state,
   onChange,
@@ -126,6 +143,30 @@ const handleLoad = (e: React.ChangeEvent<HTMLInputElement>) => {
         // Migration guard: fill in postFX defaults if missing (old JSON format)
         if (!loaded.postFX) {
           loaded.postFX = DEFAULT_STATE.postFX;
+        }
+        // Migration guard: fill in halation defaults if missing (old JSON format)
+        if (!loaded.postFX.halation) {
+          loaded.postFX = {
+            ...loaded.postFX,
+            halation: DEFAULT_STATE.postFX.halation,
+          };
+        }
+        // Migration guard: ensure bezier curves have all 4 control points (for old JSON files)
+        if (loaded.historyCurve && loaded.historyCurve.p0x === undefined) {
+          loaded.historyCurve = {
+            p0x: 0, p0y: 0,
+            p1x: loaded.historyCurve.p1x, p1y: loaded.historyCurve.p1y,
+            p2x: loaded.historyCurve.p2x, p2y: loaded.historyCurve.p2y,
+            p3x: 1, p3y: 1,
+          };
+        }
+        if (loaded.pixelWeightCurve && loaded.pixelWeightCurve.p0x === undefined) {
+          loaded.pixelWeightCurve = {
+            p0x: 0, p0y: 0,
+            p1x: loaded.pixelWeightCurve.p1x, p1y: loaded.pixelWeightCurve.p1y,
+            p2x: loaded.pixelWeightCurve.p2x, p2y: loaded.pixelWeightCurve.p2y,
+            p3x: 1, p3y: 1,
+          };
         }
         onChange(loaded);
       } catch {
@@ -609,6 +650,148 @@ const handleLoad = (e: React.ChangeEvent<HTMLInputElement>) => {
               })}
               display={`${state.postFX.bloom.radius}px`}
             />
+          </>
+        )}
+
+        {/* Halation toggle */}
+        <button
+          onClick={() => onChange({
+            postFX: {
+              ...state.postFX,
+              halation: { ...state.postFX.halation, enabled: !state.postFX.halation.enabled }
+            }
+          })}
+          style={{
+            width: "100%",
+            background: state.postFX.halation.enabled
+              ? "rgba(78,205,196,0.12)"
+              : "rgba(255,255,255,0.03)",
+            border: `1px solid ${
+              state.postFX.halation.enabled
+                ? "rgba(78,205,196,0.5)"
+                : "rgba(255,255,255,0.1)"
+            }`,
+            color: state.postFX.halation.enabled
+              ? "#4ecdc4"
+              : "rgba(232,232,232,0.45)",
+            padding: "6px 10px",
+            fontFamily: "'DM Mono', monospace",
+            fontSize: "10px",
+            cursor: "pointer",
+            borderRadius: "2px",
+            textAlign: "left" as const,
+            letterSpacing: "0.08em",
+            transition: "all 0.15s",
+            display: "flex",
+            alignItems: "center",
+            gap: "7px",
+            marginTop: "8px",
+            marginBottom: state.postFX.halation.enabled ? "10px" : "0",
+          }}
+        >
+          <span style={{
+            width: "10px",
+            height: "10px",
+            borderRadius: "2px",
+            border: `1px solid ${
+              state.postFX.halation.enabled
+                ? "#4ecdc4"
+                : "rgba(255,255,255,0.2)"
+            }`,
+            background: state.postFX.halation.enabled
+              ? "#4ecdc4"
+              : "transparent",
+            display: "inline-block",
+            flexShrink: 0,
+            transition: "all 0.15s",
+          }} />
+          Halation
+        </button>
+
+        {/* Halation sliders (conditional) */}
+        {state.postFX.halation.enabled && (
+          <>
+            <SliderRow
+              label="Threshold"
+              value={state.postFX.halation.threshold}
+              min={0}
+              max={1}
+              step={0.01}
+              onChange={v => onChange({
+                postFX: {
+                  ...state.postFX,
+                  halation: { ...state.postFX.halation, threshold: v }
+                }
+              })}
+              display={state.postFX.halation.threshold.toFixed(2)}
+            />
+
+            <SliderRow
+              label="Intensity"
+              value={state.postFX.halation.intensity}
+              min={0}
+              max={2}
+              step={0.01}
+              onChange={v => onChange({
+                postFX: {
+                  ...state.postFX,
+                  halation: { ...state.postFX.halation, intensity: v }
+                }
+              })}
+              display={state.postFX.halation.intensity.toFixed(2)}
+            />
+
+            <SliderRow
+              label="Radius"
+              value={state.postFX.halation.radius}
+              min={1}
+              max={40}
+              step={0.5}
+              onChange={v => onChange({
+                postFX: {
+                  ...state.postFX,
+                  halation: { ...state.postFX.halation, radius: v }
+                }
+              })}
+              display={`${state.postFX.halation.radius}px`}
+            />
+
+            {/* Tint color picker */}
+            <div style={ROW_STYLE}>
+              <span style={PARAM_LABEL}>Tint</span>
+              <div style={{ display: "flex", alignItems: "center", gap: "8px", flex: 1 }}>
+                <input
+                  type="color"
+                  value={rgbToHex(state.postFX.halation.tint)}
+                  onChange={e => {
+                    const hex = e.target.value;
+                    const tint = hexToRgb(hex);
+                    onChange({
+                      postFX: {
+                        ...state.postFX,
+                        halation: { ...state.postFX.halation, tint }
+                      }
+                    });
+                  }}
+                  style={{
+                    width: "28px",
+                    height: "22px",
+                    padding: 0,
+                    border: "1px solid rgba(255,255,255,0.15)",
+                    borderRadius: "2px",
+                    cursor: "pointer",
+                    background: "transparent",
+                  }}
+                />
+                <span style={{
+                  fontFamily: "'DM Mono', monospace",
+                  fontSize: "10px",
+                  color: "rgba(232,232,232,0.5)",
+                }}>
+                  {rgbToHex(state.postFX.halation.tint).toUpperCase()}
+                </span>
+              </div>
+            </div>
           </>
         )}
       </div>

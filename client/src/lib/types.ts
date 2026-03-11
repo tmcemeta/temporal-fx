@@ -12,14 +12,18 @@ export type BlendMode =
 
 export type PixelWeightMode = "uniform" | "luminance" | "darkness" | "motion";
 
-// A bezier curve defined by two control points (P1 and P2).
-// P0 = (0,0) and P3 = (1,1) are fixed endpoints.
-// x/y values are normalized 0..1.
+// A bezier curve defined by four control points (P0, P1, P2, P3).
+// All x/y values are normalized 0..1.
+// P0 and P3 can be moved for custom start/end positions.
 export interface BezierCurve {
+  p0x: number;
+  p0y: number;
   p1x: number;
   p1y: number;
   p2x: number;
   p2y: number;
+  p3x: number;
+  p3y: number;
 }
 
 // RGB color as 0..1 floats
@@ -71,17 +75,27 @@ export interface BloomState {
   radius: number;     // 1-20: blur radius in pixels
 }
 
+// Halation effect parameters (warm glow bleeding from bright areas, simulating old film)
+export interface HalationState {
+  enabled: boolean;
+  threshold: number;  // 0-1: luminance threshold (typically lower than bloom ~0.5)
+  intensity: number;  // 0-2: strength of halation overlay
+  radius: number;     // 1-40: blur radius in pixels (larger than bloom for softer glow)
+  tint: RGBColor;     // warm tint color (default: orange {r: 1.0, g: 0.4, b: 0.2})
+}
+
 // Extensible post-processing state (add future effects here)
 export interface PostFXState {
   bloom: BloomState;
+  halation: HalationState;
 }
 
 export const DEFAULT_STATE: FXState = {
   historyDepth: 8,
   feedbackMix: 0.0,
-  historyCurve: { p1x: 0.25, p1y: 0.75, p2x: 0.75, p2y: 0.25 },
+  historyCurve: { p0x: 0, p0y: 0, p1x: 0.25, p1y: 0.75, p2x: 0.75, p2y: 0.25, p3x: 1, p3y: 1 },
   pixelWeightMode: "uniform",
-  pixelWeightCurve: { p1x: 0.33, p1y: 0.33, p2x: 0.67, p2y: 0.67 },
+  pixelWeightCurve: { p0x: 0, p0y: 0, p1x: 0.33, p1y: 0.33, p2x: 0.67, p2y: 0.67, p3x: 1, p3y: 1 },
   blendMode: "screen",
   blendStrength: 0.6,
   chromaticSpread: 0,
@@ -103,6 +117,13 @@ export const DEFAULT_STATE: FXState = {
       intensity: 1.0,
       radius: 8,
     },
+    halation: {
+      enabled: false,
+      threshold: 0.5,
+      intensity: 0.8,
+      radius: 16,
+      tint: { r: 1.0, g: 0.4, b: 0.2 },
+    },
   },
 };
 
@@ -110,9 +131,9 @@ export const PRESETS: Record<string, Partial<FXState>> = {
   "Light Leak": {
     historyDepth: 12,
     feedbackMix: 0.1,
-    historyCurve: { p1x: 0.1, p1y: 0.9, p2x: 0.4, p2y: 0.6 },
+    historyCurve: { p0x: 0, p0y: 0, p1x: 0.1, p1y: 0.9, p2x: 0.4, p2y: 0.6, p3x: 1, p3y: 1 },
     pixelWeightMode: "luminance",
-    pixelWeightCurve: { p1x: 0.5, p1y: 0.0, p2x: 1.0, p2y: 0.5 },
+    pixelWeightCurve: { p0x: 0, p0y: 0, p1x: 0.5, p1y: 0.0, p2x: 1.0, p2y: 0.5, p3x: 1, p3y: 1 },
     blendMode: "screen",
     blendStrength: 0.55,
     chromaticSpread: 1,
@@ -120,9 +141,9 @@ export const PRESETS: Record<string, Partial<FXState>> = {
   "Slow Shutter": {
     historyDepth: 20,
     feedbackMix: 0.0,
-    historyCurve: { p1x: 0.25, p1y: 0.75, p2x: 0.75, p2y: 0.75 },
+    historyCurve: { p0x: 0, p0y: 0, p1x: 0.25, p1y: 0.75, p2x: 0.75, p2y: 0.75, p3x: 1, p3y: 1 },
     pixelWeightMode: "uniform",
-    pixelWeightCurve: { p1x: 0.33, p1y: 0.33, p2x: 0.67, p2y: 0.67 },
+    pixelWeightCurve: { p0x: 0, p0y: 0, p1x: 0.33, p1y: 0.33, p2x: 0.67, p2y: 0.67, p3x: 1, p3y: 1 },
     blendMode: "average",
     blendStrength: 0.8,
     chromaticSpread: 0,
@@ -130,9 +151,9 @@ export const PRESETS: Record<string, Partial<FXState>> = {
   "Chromatic Ghost": {
     historyDepth: 6,
     feedbackMix: 0.2,
-    historyCurve: { p1x: 0.0, p1y: 1.0, p2x: 0.5, p2y: 0.5 },
+    historyCurve: { p0x: 0, p0y: 0, p1x: 0.0, p1y: 1.0, p2x: 0.5, p2y: 0.5, p3x: 1, p3y: 1 },
     pixelWeightMode: "motion",
-    pixelWeightCurve: { p1x: 0.2, p1y: 0.0, p2x: 0.8, p2y: 1.0 },
+    pixelWeightCurve: { p0x: 0, p0y: 0, p1x: 0.2, p1y: 0.0, p2x: 0.8, p2y: 1.0, p3x: 1, p3y: 1 },
     blendMode: "screen",
     blendStrength: 0.5,
     chromaticSpread: 4,
@@ -140,9 +161,9 @@ export const PRESETS: Record<string, Partial<FXState>> = {
   "Burn In": {
     historyDepth: 30,
     feedbackMix: 0.85,
-    historyCurve: { p1x: 0.0, p1y: 1.0, p2x: 0.3, p2y: 0.9 },
+    historyCurve: { p0x: 0, p0y: 0, p1x: 0.0, p1y: 1.0, p2x: 0.3, p2y: 0.9, p3x: 1, p3y: 1 },
     pixelWeightMode: "luminance",
-    pixelWeightCurve: { p1x: 0.6, p1y: 0.0, p2x: 1.0, p2y: 0.8 },
+    pixelWeightCurve: { p0x: 0, p0y: 0, p1x: 0.6, p1y: 0.0, p2x: 1.0, p2y: 0.8, p3x: 1, p3y: 1 },
     blendMode: "add",
     blendStrength: 0.4,
     chromaticSpread: 0,
@@ -150,9 +171,9 @@ export const PRESETS: Record<string, Partial<FXState>> = {
   "Memory Dissolve": {
     historyDepth: 40,
     feedbackMix: 0.0,
-    historyCurve: { p1x: 0.8, p1y: 0.0, p2x: 1.0, p2y: 0.5 },
+    historyCurve: { p0x: 0, p0y: 0, p1x: 0.8, p1y: 0.0, p2x: 1.0, p2y: 0.5, p3x: 1, p3y: 1 },
     pixelWeightMode: "uniform",
-    pixelWeightCurve: { p1x: 0.33, p1y: 0.33, p2x: 0.67, p2y: 0.67 },
+    pixelWeightCurve: { p0x: 0, p0y: 0, p1x: 0.33, p1y: 0.33, p2x: 0.67, p2y: 0.67, p3x: 1, p3y: 1 },
     blendMode: "average",
     blendStrength: 0.35,
     chromaticSpread: 2,
@@ -160,9 +181,9 @@ export const PRESETS: Record<string, Partial<FXState>> = {
   "Glitch Echo": {
     historyDepth: 4,
     feedbackMix: 0.9,
-    historyCurve: { p1x: 0.5, p1y: 0.5, p2x: 0.5, p2y: 0.5 },
+    historyCurve: { p0x: 0, p0y: 0, p1x: 0.5, p1y: 0.5, p2x: 0.5, p2y: 0.5, p3x: 1, p3y: 1 },
     pixelWeightMode: "motion",
-    pixelWeightCurve: { p1x: 0.0, p1y: 0.0, p2x: 1.0, p2y: 1.0 },
+    pixelWeightCurve: { p0x: 0, p0y: 0, p1x: 0.0, p1y: 0.0, p2x: 1.0, p2y: 1.0, p3x: 1, p3y: 1 },
     blendMode: "difference",
     blendStrength: 0.7,
     chromaticSpread: 3,
