@@ -7,7 +7,7 @@
 // compositing in the overlay shader, which still operates on the mask half.
 
 import React, { useRef } from "react";
-import type { FXState, BlendMode, PixelWeightMode } from "@/lib/types";
+import type { FXState, BlendMode, PixelWeightMode, PostFXState, BloomState } from "@/lib/types";
 import { DEFAULT_STATE, PRESETS } from "@/lib/types";
 import BezierEditor from "./BezierEditor";
 import MaskColorPicker from "./MaskColorPicker";
@@ -116,13 +116,17 @@ export default function ControlPanel({
     URL.revokeObjectURL(url);
   };
 
-  const handleLoad = (e: React.ChangeEvent<HTMLInputElement>) => {
+const handleLoad = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
     const reader = new FileReader();
     reader.onload = ev => {
       try {
-        const loaded = JSON.parse(ev.target?.result as string) as FXState;
+        const loaded = JSON.parse(ev.target?.result as string) as Partial<FXState>;
+        // Migration guard: fill in postFX defaults if missing (old JSON format)
+        if (!loaded.postFX) {
+          loaded.postFX = DEFAULT_STATE.postFX;
+        }
         onChange(loaded);
       } catch {
         alert("Invalid state file.");
@@ -462,7 +466,7 @@ export default function ControlPanel({
         )}
       </div>
 
-      {/* Blend */}
+{/* Blend */}
       <div style={SECTION_STYLE}>
         <span style={LABEL_STYLE}>Blend</span>
 
@@ -498,6 +502,115 @@ export default function ControlPanel({
           onChange={v => onChange({ chromaticSpread: v })}
           display={state.chromaticSpread === 0 ? "off" : `${state.chromaticSpread}f`}
         />
+      </div>
+
+      {/* Post FX */}
+      <div style={SECTION_STYLE}>
+        <span style={LABEL_STYLE}>Post FX</span>
+
+        {/* Bloom toggle */}
+        <button
+          onClick={() => onChange({
+            postFX: {
+              ...state.postFX,
+              bloom: { ...state.postFX.bloom, enabled: !state.postFX.bloom.enabled }
+            }
+          })}
+          style={{
+            width: "100%",
+            background: state.postFX.bloom.enabled
+              ? "rgba(78,205,196,0.12)"
+              : "rgba(255,255,255,0.03)",
+            border: `1px solid ${
+              state.postFX.bloom.enabled
+                ? "rgba(78,205,196,0.5)"
+                : "rgba(255,255,255,0.1)"
+            }`,
+            color: state.postFX.bloom.enabled
+              ? "#4ecdc4"
+              : "rgba(232,232,232,0.45)",
+            padding: "6px 10px",
+            fontFamily: "'DM Mono', monospace",
+            fontSize: "10px",
+            cursor: "pointer",
+            borderRadius: "2px",
+            textAlign: "left" as const,
+            letterSpacing: "0.08em",
+            transition: "all 0.15s",
+            display: "flex",
+            alignItems: "center",
+            gap: "7px",
+            marginBottom: state.postFX.bloom.enabled ? "10px" : "0",
+          }}
+        >
+          <span style={{
+            width: "10px",
+            height: "10px",
+            borderRadius: "2px",
+            border: `1px solid ${
+              state.postFX.bloom.enabled
+                ? "#4ecdc4"
+                : "rgba(255,255,255,0.2)"
+            }`,
+            background: state.postFX.bloom.enabled
+              ? "#4ecdc4"
+              : "transparent",
+            display: "inline-block",
+            flexShrink: 0,
+            transition: "all 0.15s",
+          }} />
+          Bloom
+        </button>
+
+        {/* Bloom sliders (conditional) */}
+        {state.postFX.bloom.enabled && (
+          <>
+            <SliderRow
+              label="Threshold"
+              value={state.postFX.bloom.threshold}
+              min={0}
+              max={1}
+              step={0.01}
+              onChange={v => onChange({
+                postFX: {
+                  ...state.postFX,
+                  bloom: { ...state.postFX.bloom, threshold: v }
+                }
+              })}
+              display={state.postFX.bloom.threshold.toFixed(2)}
+            />
+
+            <SliderRow
+              label="Intensity"
+              value={state.postFX.bloom.intensity}
+              min={0}
+              max={10}
+              step={0.01}
+              onChange={v => onChange({
+                postFX: {
+                  ...state.postFX,
+                  bloom: { ...state.postFX.bloom, intensity: v }
+                }
+              })}
+              display={state.postFX.bloom.intensity.toFixed(2)}
+            />
+
+            <SliderRow
+              label="Radius"
+              value={state.postFX.bloom.radius}
+              min={1}
+              max={20}
+              step={0.5}
+              onChange={v => onChange({
+                postFX: {
+                  ...state.postFX,
+                  bloom: { ...state.postFX.bloom, radius: v }
+                }
+              })}
+              display={`${state.postFX.bloom.radius}px`}
+            />
+          </>
+        )}
       </div>
 
       {/* Debug View */}

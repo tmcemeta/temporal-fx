@@ -53,11 +53,27 @@ export interface FXState {
   // How many mask color slots are active (1..5)
   maskCount: number;
 
-  // Debug view: 0=normal, 1=subject only, 2=background only
+// Debug view: 0=normal, 1=subject only, 2=background only
   debugView: 0 | 1 | 2;
 
   // Input format: true = side-by-side hstack (left=base, right=mask)
   isHstack: boolean;
+
+  // Post-processing effects
+  postFX: PostFXState;
+}
+
+// Bloom effect parameters
+export interface BloomState {
+  enabled: boolean;
+  threshold: number;  // 0-1: luminance threshold for bright extraction
+  intensity: number;  // 0-2: strength of bloom overlay
+  radius: number;     // 1-20: blur radius in pixels
+}
+
+// Extensible post-processing state (add future effects here)
+export interface PostFXState {
+  bloom: BloomState;
 }
 
 export const DEFAULT_STATE: FXState = {
@@ -80,6 +96,14 @@ export const DEFAULT_STATE: FXState = {
     { r: 1.0, g: 1.0, b: 0.0 },
     { r: 1.0, g: 1.0, b: 1.0 },
   ],
+  postFX: {
+    bloom: {
+      enabled: false,
+      threshold: 0.7,
+      intensity: 1.0,
+      radius: 8,
+    },
+  },
 };
 
 export const PRESETS: Record<string, Partial<FXState>> = {

@@ -286,3 +286,87 @@ void main() {
   fragColor = texture(u_texture, v_texCoord);
 }
 `;
+
+// ─── Post-Processing Shaders ─────────────────────────────────────────────────
+
+// Bright pass: extract pixels above luminance threshold
+// Rendered at half resolution for efficiency (viewport controls this)
+export const BRIGHT_PASS_SHADER = `#version 300 es
+precision highp float;
+
+in vec2 v_texCoord;
+out vec4 fragColor;
+
+uniform sampler2D u_source;
+uniform float u_threshold;
+
+float getLuma(vec3 c) {
+  return dot(c, vec3(0.2126, 0.7152, 0.0722));
+}
+
+void main() {
+  vec4 color = texture(u_source, v_texCoord);
+  float luma = getLuma(color.rgb);
+
+  // Soft threshold with smooth falloff
+  float brightness = max(0.0, luma - u_threshold);
+  float contribution = brightness / (brightness + 1.0);
+
+  fragColor = vec4(color.rgb * contribution, color.a);
+}
+`;
+
+// Single-axis Gaussian blur (9-tap)
+// Direction: (1,0) for horizontal, (0,1) for vertical
+export const BLUR_SHADER = `#version 300 es
+precision highp float;
+
+in vec2 v_texCoord;
+out vec4 fragColor;
+
+uniform sampler2D u_source;
+uniform vec2 u_direction;  // (1,0) or (0,1) normalized
+uniform float u_radius;    // blur radius in pixels
+uniform vec2 u_texelSize;  // 1.0 / textureSize
+
+void main() {
+  // 9-tap Gaussian weights (sigma ~= radius/3)
+  const float weights[5] = float[5](
+    0.227027, 0.1945946, 0.1216216, 0.054054, 0.016216
+  );
+
+  vec2 offset = u_direction * u_texelSize * u_radius * 0.25;
+
+  vec4 result = texture(u_source, v_texCoord) * weights[0];
+
+  for (int i = 1; i < 5; i++) {
+    vec2 off = offset * float(i);
+    result += texture(u_source, v_texCoord + off) * weights[i];
+    result += texture(u_source, v_texCoord - off) * weights[i];
+  }
+
+  fragColor = result;
+}
+`;
+
+// Bloom composite: additive blend of blurred bloom onto original
+export const BLOOM_COMPOSITE_SHADER = `#version 300 es
+precision highp float;
+
+in vec2 v_texCoord;
+out vec4 fragColor;
+
+uniform sampler2D u_original;
+uniform sampler2D u_bloom;
+uniform float u_intensity;
+
+void main() {
+  vec4 original = texture(u_original, v_texCoord);
+  vec4 bloom = texture(u_bloom, v_texCoord);
+
+  // Additive blend with intensity control
+  vec3 result = original.rgb + bloom.rgb * u_intensity;
+
+  fragColor = vec4(result, original.a);
+}
+`;

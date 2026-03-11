@@ -24,11 +24,14 @@
 // IMPORTANT: All textures used as FBO attachments MUST be pre-allocated with
 // explicit dimensions via texImage2D(null) before copyTexSubImage2D is called.
 
-import type { FXState } from "./types";
+import type { FXState, PostFXState } from "./types";
 import {
   VERTEX_SHADER,
   COMPOSITE_SHADER,
   OVERLAY_SHADER,
+  BRIGHT_PASS_SHADER,
+  BLUR_SHADER,
+  BLOOM_COMPOSITE_SHADER,
   MAX_HISTORY,
   ATLAS_COLS,
   ATLAS_ROWS,
@@ -67,8 +70,20 @@ export class TemporalFXEngine {
   private maskFrameTexture!: WebGLTexture;
   private prevFrameTexture!: WebGLTexture;
 
-  // Reusable FBO for copy operations
+// Reusable FBO for copy operations
   private copyFBO!: WebGLFramebuffer;
+
+  // Post-FX resources
+  private postFxA!: WebGLTexture;           // Full resolution ping-pong A
+  private postFxB!: WebGLTexture;           // Full resolution ping-pong B
+  private blurPingHalf!: WebGLTexture;      // Half resolution for blur
+  private blurPongHalf!: WebGLTexture;      // Half resolution for blur
+  private postFxFBO!: WebGLFramebuffer;     // Reusable FBO for post-FX passes
+  private brightPassProgram!: Program;
+  private blurProgram!: Program;
+  private bloomCompositeProgram!: Program;
+  private halfWidth = 0;
+  private halfHeight = 0;
 
   // Off-screen canvas used to split the hstack frame into two halves.
   // Created/resized in resize(). drawImage offsets select the correct half.
@@ -125,15 +140,28 @@ export class TemporalFXEngine {
       "u_fxOutput", "u_baseVideo", "u_maskVideo",
       "u_hasMask", "u_maskColors", "u_numMaskColors", "u_debugView",
     ]);
-    for (let i = 0; i < 5; i++) {
+for (let i = 0; i < 5; i++) {
       this.overlayProgram.uniforms[`u_maskColors[${i}]`] =
         gl.getUniformLocation(this.overlayProgram.program, `u_maskColors[${i}]`);
     }
 
+    // Post-FX programs
+    this.brightPassProgram = this.createProgram(VERTEX_SHADER, BRIGHT_PASS_SHADER, [
+      "u_source", "u_threshold",
+    ]);
+
+    this.blurProgram = this.createProgram(VERTEX_SHADER, BLUR_SHADER, [
+      "u_source", "u_direction", "u_radius", "u_texelSize",
+    ]);
+
+    this.bloomCompositeProgram = this.createProgram(VERTEX_SHADER, BLOOM_COMPOSITE_SHADER, [
+      "u_original", "u_bloom", "u_intensity",
+    ]);
+
     this.quadBuffer = this.createQuadBuffer();
     this.copyFBO = gl.createFramebuffer()!;
 
-    // Create textures (storage allocated later in resize())
+// Create textures (storage allocated later in resize())
     this.baseFrameTexture = this.makeTexture(gl.LINEAR);
     this.maskFrameTexture = this.makeTexture(gl.LINEAR);
     this.prevFrameTexture = this.makeTexture(gl.LINEAR);
@@ -141,7 +169,14 @@ export class TemporalFXEngine {
     this.atlasOriginal = this.makeTexture(gl.NEAREST);
     this.atlasProcessed = this.makeTexture(gl.NEAREST);
 
+    // Post-FX textures
+    this.postFxA = this.makeTexture(gl.LINEAR);
+    this.postFxB = this.makeTexture(gl.LINEAR);
+    this.blurPingHalf = this.makeTexture(gl.LINEAR);
+    this.blurPongHalf = this.makeTexture(gl.LINEAR);
+
     this.compositeFBO = gl.createFramebuffer()!;
+    this.postFxFBO = gl.createFramebuffer()!;
   }
 
   private createProgram(vertSrc: string, fragSrc: string, uniformNames: string[]): Program {
@@ -331,20 +366,30 @@ export class TemporalFXEngine {
     const atlasW = width * this.atlasCols;
     const atlasH = height * this.atlasRows;
 
-    console.log(`[TemporalFX] Frame: ${width}x${height}, Atlas: ${atlasW}x${atlasH} (${this.atlasCols}x${this.atlasRows} = ${this.maxHistoryFrames} frames)`);
+console.log(`[TemporalFX] Frame: ${width}x${height}, Atlas: ${atlasW}x${atlasH} (${this.atlasCols}x${this.atlasRows} = ${this.maxHistoryFrames} frames)`);
+
+    // Compute half-resolution dimensions for blur passes
+    this.halfWidth = Math.max(1, Math.floor(width / 2));
+    this.halfHeight = Math.max(1, Math.floor(height / 2));
 
     // (Re)create the split canvas to match the new logical frame size.
     // This canvas is frameWidth × frameHeight — exactly one half of the hstack.
     this.splitCanvas = new OffscreenCanvas(width, height);
     this.splitCtx = this.splitCanvas.getContext("2d", { willReadFrequently: false }) as OffscreenCanvasRenderingContext2D;
 
-    // Pre-allocate all textures with explicit dimensions
+// Pre-allocate all textures with explicit dimensions
     this.allocTexture(this.baseFrameTexture, width, height);
     this.allocTexture(this.maskFrameTexture, width, height);
     this.allocTexture(this.prevFrameTexture, width, height);
     this.allocTexture(this.compositeTexture, width, height);
     this.allocTexture(this.atlasOriginal, atlasW, atlasH);
     this.allocTexture(this.atlasProcessed, atlasW, atlasH);
+
+    // Allocate post-FX textures
+    this.allocTexture(this.postFxA, width, height);
+    this.allocTexture(this.postFxB, width, height);
+    this.allocTexture(this.blurPingHalf, this.halfWidth, this.halfHeight);
+    this.allocTexture(this.blurPongHalf, this.halfWidth, this.halfHeight);
 
     // Attach compositeTexture to compositeFBO
     gl.bindFramebuffer(gl.FRAMEBUFFER, this.compositeFBO);
@@ -359,7 +404,7 @@ export class TemporalFXEngine {
     this.historyFilled = 0;
   }
 
-  /**
+/**
    * Render one frame.
    *
    * @param video    The <video> element
@@ -469,14 +514,33 @@ export class TemporalFXEngine {
 
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
 
-    // 4. Overlay pass (to canvas)
+    // 4. Store compositeTexture to history atlas BEFORE post-FX
+    // This prevents recursive bloom buildup in feedback mode
+    const slot = this.historyHead;
+    this.copyToAtlasTile(this.baseFrameTexture, this.atlasOriginal, slot);
+    this.copyToAtlasTile(this.compositeTexture, this.atlasProcessed, slot);
+
+    // 5. Copy base frame → prevFrameTexture for next frame's motion detection
+    gl.bindFramebuffer(gl.READ_FRAMEBUFFER, this.copyFBO);
+    gl.framebufferTexture2D(gl.READ_FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, this.baseFrameTexture, 0);
+    const prevStatus = gl.checkFramebufferStatus(gl.READ_FRAMEBUFFER);
+    if (prevStatus === gl.FRAMEBUFFER_COMPLETE) {
+      gl.bindTexture(gl.TEXTURE_2D, this.prevFrameTexture);
+      gl.copyTexSubImage2D(gl.TEXTURE_2D, 0, 0, 0, 0, 0, this.width, this.height);
+    }
+    gl.bindFramebuffer(gl.READ_FRAMEBUFFER, null);
+
+    // 6. Post-FX chain (if enabled)
+    const overlaySourceTexture = this.runPostFX(state.postFX);
+
+    // 7. Overlay pass (to canvas)
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
     gl.viewport(0, 0, this.width, this.height);
     gl.useProgram(this.overlayProgram.program);
     this.bindQuad(this.overlayProgram);
 
     gl.activeTexture(gl.TEXTURE0);
-    gl.bindTexture(gl.TEXTURE_2D, this.compositeTexture);
+    gl.bindTexture(gl.TEXTURE_2D, overlaySourceTexture);
     gl.uniform1i(this.overlayProgram.uniforms["u_fxOutput"], 0);
 
     gl.activeTexture(gl.TEXTURE1);
@@ -498,37 +562,119 @@ export class TemporalFXEngine {
 
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
 
-    // 5. Store current frame into history ring buffer
-    const slot = this.historyHead;
-    this.copyToAtlasTile(this.baseFrameTexture, this.atlasOriginal, slot);
-    this.copyToAtlasTile(this.compositeTexture, this.atlasProcessed, slot);
-
-    // Copy base frame → prevFrameTexture for next frame's motion detection
-    gl.bindFramebuffer(gl.READ_FRAMEBUFFER, this.copyFBO);
-    gl.framebufferTexture2D(gl.READ_FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, this.baseFrameTexture, 0);
-    const prevStatus = gl.checkFramebufferStatus(gl.READ_FRAMEBUFFER);
-    if (prevStatus === gl.FRAMEBUFFER_COMPLETE) {
-      gl.bindTexture(gl.TEXTURE_2D, this.prevFrameTexture);
-      gl.copyTexSubImage2D(gl.TEXTURE_2D, 0, 0, 0, 0, 0, this.width, this.height);
-    }
-    gl.bindFramebuffer(gl.READ_FRAMEBUFFER, null);
-
+    // 8. Advance history head
     this.historyHead = (this.historyHead + 1) % this.maxHistoryFrames;
     this.historyFilled = Math.min(this.historyFilled + 1, this.maxHistoryFrames);
   }
 
-  dispose() {
+  /**
+   * Run post-processing effects chain.
+   * Returns the texture to use as input to the overlay pass.
+   */
+  private runPostFX(postFX: PostFXState): WebGLTexture {
+    const gl = this.gl;
+    const bloom = postFX.bloom;
+
+    // If no effects enabled, return compositeTexture directly
+    if (!bloom.enabled) {
+      return this.compositeTexture;
+    }
+
+    // a. Copy compositeTexture → postFxA
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.postFxFBO);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, this.postFxA, 0);
+    gl.viewport(0, 0, this.width, this.height);
+
+    gl.bindFramebuffer(gl.READ_FRAMEBUFFER, this.copyFBO);
+    gl.framebufferTexture2D(gl.READ_FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, this.compositeTexture, 0);
+    gl.blitFramebuffer(
+      0, 0, this.width, this.height,
+      0, 0, this.width, this.height,
+      gl.COLOR_BUFFER_BIT, gl.NEAREST
+    );
+    gl.bindFramebuffer(gl.READ_FRAMEBUFFER, null);
+
+    // b. Bright-pass: postFxA → blurPongHalf (half-res viewport for implicit downsample)
+    gl.bindFramebuffer(gl.FRAMEBUFFER, this.postFxFBO);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, this.blurPongHalf, 0);
+    gl.viewport(0, 0, this.halfWidth, this.halfHeight);
+    gl.useProgram(this.brightPassProgram.program);
+    this.bindQuad(this.brightPassProgram);
+
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, this.postFxA);
+    gl.uniform1i(this.brightPassProgram.uniforms["u_source"], 0);
+    gl.uniform1f(this.brightPassProgram.uniforms["u_threshold"], bloom.threshold);
+
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+
+    // c. H-blur: blurPongHalf → blurPingHalf
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, this.blurPingHalf, 0);
+    gl.useProgram(this.blurProgram.program);
+    this.bindQuad(this.blurProgram);
+
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, this.blurPongHalf);
+    gl.uniform1i(this.blurProgram.uniforms["u_source"], 0);
+    gl.uniform2f(this.blurProgram.uniforms["u_direction"], 1.0, 0.0);
+    gl.uniform1f(this.blurProgram.uniforms["u_radius"], bloom.radius);
+    gl.uniform2f(this.blurProgram.uniforms["u_texelSize"], 1.0 / this.halfWidth, 1.0 / this.halfHeight);
+
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+
+    // d. V-blur: blurPingHalf → blurPongHalf
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, this.blurPongHalf, 0);
+
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, this.blurPingHalf);
+    gl.uniform1i(this.blurProgram.uniforms["u_source"], 0);
+    gl.uniform2f(this.blurProgram.uniforms["u_direction"], 0.0, 1.0);
+
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+
+    // e. Bloom composite: postFxA + blurPongHalf → postFxB
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, this.postFxB, 0);
+    gl.viewport(0, 0, this.width, this.height);
+    gl.useProgram(this.bloomCompositeProgram.program);
+    this.bindQuad(this.bloomCompositeProgram);
+
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, this.postFxA);
+    gl.uniform1i(this.bloomCompositeProgram.uniforms["u_original"], 0);
+
+    gl.activeTexture(gl.TEXTURE1);
+    gl.bindTexture(gl.TEXTURE_2D, this.blurPongHalf);
+    gl.uniform1i(this.bloomCompositeProgram.uniforms["u_bloom"], 1);
+
+    gl.uniform1f(this.bloomCompositeProgram.uniforms["u_intensity"], bloom.intensity);
+
+    gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+
+    return this.postFxB;
+  }
+
+dispose() {
     const gl = this.gl;
     gl.deleteProgram(this.compositeProgram.program);
     gl.deleteProgram(this.overlayProgram.program);
+    gl.deleteProgram(this.brightPassProgram.program);
+    gl.deleteProgram(this.blurProgram.program);
+    gl.deleteProgram(this.bloomCompositeProgram.program);
     gl.deleteTexture(this.atlasOriginal);
     gl.deleteTexture(this.atlasProcessed);
     gl.deleteTexture(this.baseFrameTexture);
     gl.deleteTexture(this.maskFrameTexture);
     gl.deleteTexture(this.prevFrameTexture);
     gl.deleteTexture(this.compositeTexture);
+    gl.deleteTexture(this.postFxA);
+    gl.deleteTexture(this.postFxB);
+    gl.deleteTexture(this.blurPingHalf);
+    gl.deleteTexture(this.blurPongHalf);
     gl.deleteFramebuffer(this.compositeFBO);
     gl.deleteFramebuffer(this.copyFBO);
+    gl.deleteFramebuffer(this.postFxFBO);
     gl.deleteBuffer(this.quadBuffer);
   }
 }

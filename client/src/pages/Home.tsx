@@ -22,8 +22,15 @@ export default function Home() {
 
   const videoInputRef = useRef<HTMLInputElement>(null);
 
-  const handleStateChange = useCallback((patch: Partial<FXState>) => {
-    setState(prev => ({ ...prev, ...patch }));
+const handleStateChange = useCallback((patch: Partial<FXState>) => {
+    setState(prev => {
+      const next = { ...prev, ...patch };
+      // Migration guard: ensure postFX exists with defaults
+      if (!next.postFX) {
+        next.postFX = DEFAULT_STATE.postFX;
+      }
+      return next;
+    });
   }, []);
 
   const handleLoadVideo = () => videoInputRef.current?.click();
