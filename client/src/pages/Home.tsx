@@ -2,6 +2,11 @@
 // "Cinematic Void" design: full-height two-column layout.
 // Left: VideoPreview (WebGL canvas + playback controls)
 // Right: ControlPanel (all FX parameters)
+//
+// Video format: a single hstack-encoded file produced by:
+//   ffmpeg -y -i "$BASE_VIDEO" -i "$MASK_VIDEO" -filter_complex hstack "$OUTPUT_VIDEO"
+// The left half of the video is the base; the right half is the mask.
+// A single decoder guarantees lockstep playback — no drift correction needed.
 
 import React, { useState, useCallback, useRef } from "react";
 import type { FXState } from "@/lib/types";
@@ -11,47 +16,33 @@ import ControlPanel from "@/components/ControlPanel";
 
 export default function Home() {
   const [state, setState] = useState<FXState>(DEFAULT_STATE);
-  const [baseUrl, setBaseUrl] = useState<string | null>(null);
-  const [maskUrl, setMaskUrl] = useState<string | null>(null);
-  const [baseFileName, setBaseFileName] = useState("");
-  const [maskFileName, setMaskFileName] = useState("");
+  const [videoUrl, setVideoUrl] = useState<string | null>(null);
+  const [videoFileName, setVideoFileName] = useState("");
   const [bufferWarmup, setBufferWarmup] = useState(1);
 
-  const baseInputRef = useRef<HTMLInputElement>(null);
-  const maskInputRef = useRef<HTMLInputElement>(null);
+  const videoInputRef = useRef<HTMLInputElement>(null);
 
   const handleStateChange = useCallback((patch: Partial<FXState>) => {
     setState(prev => ({ ...prev, ...patch }));
   }, []);
 
-  const handleLoadBase = () => baseInputRef.current?.click();
-  const handleLoadMask = () => maskInputRef.current?.click();
+  const handleLoadVideo = () => videoInputRef.current?.click();
 
-  const handleBaseFile = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleVideoFile = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
-    if (baseUrl) URL.revokeObjectURL(baseUrl);
+    if (videoUrl) URL.revokeObjectURL(videoUrl);
     const url = URL.createObjectURL(file);
-    setBaseUrl(url);
-    setBaseFileName(file.name);
-    e.target.value = "";
-  };
-
-  const handleMaskFile = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    if (maskUrl) URL.revokeObjectURL(maskUrl);
-    const url = URL.createObjectURL(file);
-    setMaskUrl(url);
-    setMaskFileName(file.name);
+    setVideoUrl(url);
+    setVideoFileName(file.name);
     e.target.value = "";
   };
 
   const handleDropVideo = (file: File) => {
-    if (baseUrl) URL.revokeObjectURL(baseUrl);
+    if (videoUrl) URL.revokeObjectURL(videoUrl);
     const url = URL.createObjectURL(file);
-    setBaseUrl(url);
-    setBaseFileName(file.name);
+    setVideoUrl(url);
+    setVideoFileName(file.name);
   };
 
   return (
@@ -65,8 +56,7 @@ export default function Home() {
     }}>
       {/* Preview area */}
       <VideoPreview
-        baseUrl={baseUrl}
-        maskUrl={maskUrl}
+        videoUrl={videoUrl}
         state={state}
         onBufferWarmup={setBufferWarmup}
         onDropVideo={handleDropVideo}
@@ -76,29 +66,19 @@ export default function Home() {
       <ControlPanel
         state={state}
         onChange={handleStateChange}
-        onLoadBase={handleLoadBase}
-        onLoadMask={handleLoadMask}
-        hasBase={!!baseUrl}
-        hasMask={!!maskUrl}
-        baseFileName={baseFileName}
-        maskFileName={maskFileName}
+        onLoadVideo={handleLoadVideo}
+        hasVideo={!!videoUrl}
+        videoFileName={videoFileName}
         bufferWarmup={bufferWarmup}
       />
 
-      {/* Hidden file inputs */}
+      {/* Hidden file input */}
       <input
-        ref={baseInputRef}
+        ref={videoInputRef}
         type="file"
         accept="video/*"
         style={{ display: "none" }}
-        onChange={handleBaseFile}
-      />
-      <input
-        ref={maskInputRef}
-        type="file"
-        accept="video/*"
-        style={{ display: "none" }}
-        onChange={handleMaskFile}
+        onChange={handleVideoFile}
       />
     </div>
   );

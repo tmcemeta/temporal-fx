@@ -1,23 +1,26 @@
 // TEMPORAL FX — VideoPreview Component
-// Hosts the WebGL canvas, hidden video elements, and playback controls.
+// Hosts the WebGL canvas, a single hidden video element, and playback controls.
 // Runs the render loop via requestAnimationFrame.
+//
+// Video format: hstack-encoded (base = left half, mask = right half).
+// A single <video> element decodes both halves in lockstep — no drift is possible.
+// The engine receives the video element and the logical frame width (videoWidth / 2);
+// it uses UNPACK_ROW_LENGTH / UNPACK_SKIP_PIXELS to upload each half independently.
 
 import React, { useRef, useEffect, useCallback, useState } from "react";
 import type { FXState } from "@/lib/types";
 import { TemporalFXEngine } from "@/lib/webglEngine";
 
 interface Props {
-  baseUrl: string | null;
-  maskUrl: string | null;
+  videoUrl: string | null;
   state: FXState;
   onBufferWarmup: (ratio: number) => void;
   onDropVideo?: (file: File) => void;
 }
 
-export default function VideoPreview({ baseUrl, maskUrl, state, onBufferWarmup, onDropVideo }: Props) {
+export default function VideoPreview({ videoUrl, state, onBufferWarmup, onDropVideo }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const baseVideoRef = useRef<HTMLVideoElement>(null);
-  const maskVideoRef = useRef<HTMLVideoElement>(null);
+  const videoRef = useRef<HTMLVideoElement>(null);
   const engineRef = useRef<TemporalFXEngine | null>(null);
   const rafRef = useRef<number>(0);
   const stateRef = useRef(state);
@@ -28,9 +31,11 @@ export default function VideoPreview({ baseUrl, maskUrl, state, onBufferWarmup, 
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
   const [isLooping, setIsLooping] = useState(true);
-  // Use a ref for video dimensions to avoid stale closure in the render loop
-  const videoDimsRef = useRef({ w: 0, h: 0 });
-  const [videoSize, setVideoSize] = useState({ w: 0, h: 0 });  // for aspect ratio display only
+
+  // Use a ref for logical frame dimensions to avoid stale closures in the render loop.
+  // For an hstack video, logicalWidth = videoWidth / 2, logicalHeight = videoHeight.
+  const frameDimsRef = useRef({ w: 0, h: 0 });
+  const [videoSize, setVideoSize] = useState({ w: 0, h: 0 }); // for aspect ratio display only
 
   // Keep stateRef in sync without triggering re-renders
   useEffect(() => { stateRef.current = state; }, [state]);
@@ -53,38 +58,34 @@ export default function VideoPreview({ baseUrl, maskUrl, state, onBufferWarmup, 
   // Render loop
   const renderLoop = useCallback(() => {
     const engine = engineRef.current;
-    const base = baseVideoRef.current;
-    if (!engine || !base || base.readyState < 2) {
+    const video = videoRef.current;
+    if (!engine || !video || video.readyState < 2) {
       rafRef.current = requestAnimationFrame(renderLoop);
       return;
     }
 
-    const mask = maskVideoRef.current;
+    // Logical frame size: each half of the hstack video
+    const fw = Math.floor(video.videoWidth / 2) || 320;
+    const fh = video.videoHeight || 240;
 
-    // Resize canvas to match video dimensions
-    const vw = base.videoWidth || 640;
-    const vh = base.videoHeight || 360;
-    // Only resize (and clear history) when dimensions actually change
-    // Use a ref so this comparison is stable across RAF frames
-    if (vw !== videoDimsRef.current.w || vh !== videoDimsRef.current.h) {
-      videoDimsRef.current = { w: vw, h: vh };
-      setVideoSize({ w: vw, h: vh }); // update display aspect ratio
-      engine.resize(vw, vh);
+    // Resize (and clear history) only when logical dimensions change
+    if (fw !== frameDimsRef.current.w || fh !== frameDimsRef.current.h) {
+      frameDimsRef.current = { w: fw, h: fh };
+      setVideoSize({ w: fw, h: fh });
+      engine.resize(fw, fh);
     }
 
-    engine.renderFrame(base, mask && mask.readyState >= 2 ? mask : null, stateRef.current);
+    engine.renderFrame(video, stateRef.current);
 
-    // Update buffer warmup
+    // Update buffer warmup indicator
     const depth = stateRef.current.historyDepth;
     if (depth > 0) {
-      const filled = engine.historyFilled;
-      onBufferWarmup(Math.min(filled / depth, 1));
+      onBufferWarmup(Math.min(engine.historyFilled / depth, 1));
     } else {
       onBufferWarmup(1);
     }
 
-    // Sync time display
-    setCurrentTime(base.currentTime);
+    setCurrentTime(video.currentTime);
 
     rafRef.current = requestAnimationFrame(renderLoop);
   }, [onBufferWarmup]);
@@ -94,12 +95,12 @@ export default function VideoPreview({ baseUrl, maskUrl, state, onBufferWarmup, 
     return () => cancelAnimationFrame(rafRef.current);
   }, [renderLoop]);
 
-  // Load base video
+  // Load video
   useEffect(() => {
-    const video = baseVideoRef.current;
+    const video = videoRef.current;
     if (!video) return;
-    if (baseUrl) {
-      video.src = baseUrl;
+    if (videoUrl) {
+      video.src = videoUrl;
       video.load();
       video.onloadedmetadata = () => {
         setDuration(video.duration);
@@ -110,21 +111,9 @@ export default function VideoPreview({ baseUrl, maskUrl, state, onBufferWarmup, 
       setDuration(0);
     }
     // Reset dims ref so resize fires on the new video's first frame
-    videoDimsRef.current = { w: 0, h: 0 };
+    frameDimsRef.current = { w: 0, h: 0 };
     engineRef.current?.clearHistory();
-  }, [baseUrl]);
-
-  // Load mask video
-  useEffect(() => {
-    const video = maskVideoRef.current;
-    if (!video) return;
-    if (maskUrl) {
-      video.src = maskUrl;
-      video.load();
-    } else {
-      video.src = "";
-    }
-  }, [maskUrl]);
+  }, [videoUrl]);
 
   // Keyboard shortcut: spacebar = play/pause
   useEffect(() => {
@@ -138,57 +127,43 @@ export default function VideoPreview({ baseUrl, maskUrl, state, onBufferWarmup, 
     return () => window.removeEventListener("keydown", onKey);
   }, [isPlaying]);
 
-  // Sync mask video time with base
+  // Clear history on seek — temporal continuity is broken by any time jump
   useEffect(() => {
-    const base = baseVideoRef.current;
-    const mask = maskVideoRef.current;
-    if (!base || !mask || !maskUrl) return;
-
-    const syncMask = () => {
-      if (Math.abs(mask.currentTime - base.currentTime) > 0.05) {
-        mask.currentTime = base.currentTime;
-      }
-    };
-    base.addEventListener("timeupdate", syncMask);
-    base.addEventListener("seeked", () => {
-      mask.currentTime = base.currentTime;
+    const video = videoRef.current;
+    if (!video || !videoUrl) return;
+    const onSeeked = () => {
       engineRef.current?.clearHistory();
-    });
-    return () => base.removeEventListener("timeupdate", syncMask);
-  }, [maskUrl]);
+    };
+    video.addEventListener("seeked", onSeeked);
+    return () => video.removeEventListener("seeked", onSeeked);
+  }, [videoUrl]);
 
-  // Clear history on scrub
   const handleScrub = (e: React.ChangeEvent<HTMLInputElement>) => {
     const t = parseFloat(e.target.value);
-    const base = baseVideoRef.current;
-    if (base) {
-      base.currentTime = t;
+    const video = videoRef.current;
+    if (video) {
+      video.currentTime = t;
       engineRef.current?.clearHistory();
     }
   };
 
   const togglePlay = () => {
-    const base = baseVideoRef.current;
-    const mask = maskVideoRef.current;
-    if (!base) return;
-    if (base.paused) {
-      base.play();
-      mask?.play();
+    const video = videoRef.current;
+    if (!video) return;
+    if (video.paused) {
+      video.play();
       setIsPlaying(true);
     } else {
-      base.pause();
-      mask?.pause();
+      video.pause();
       setIsPlaying(false);
     }
   };
 
   const toggleLoop = () => {
-    const base = baseVideoRef.current;
-    const mask = maskVideoRef.current;
+    const video = videoRef.current;
     const newLoop = !isLooping;
     setIsLooping(newLoop);
-    if (base) base.loop = newLoop;
-    if (mask) mask.loop = newLoop;
+    if (video) video.loop = newLoop;
   };
 
   const formatTime = (t: number) => {
@@ -198,7 +173,7 @@ export default function VideoPreview({ baseUrl, maskUrl, state, onBufferWarmup, 
     return `${m}:${s.toString().padStart(2, "0")}.${f.toString().padStart(2, "0")}`;
   };
 
-  // Compute display size for canvas (fit in container)
+  // Compute display aspect ratio from logical (single-half) dimensions
   const aspectRatio = videoSize.h > 0 ? videoSize.w / videoSize.h : 16 / 9;
 
   return (
@@ -221,7 +196,6 @@ export default function VideoPreview({ baseUrl, maskUrl, state, onBufferWarmup, 
         setIsDragOver(false);
         const file = e.dataTransfer.files[0];
         if (file && file.type.startsWith("video/")) {
-          // Emit a custom event to parent for handling
           onDropVideo?.(file);
         }
       }}
@@ -235,7 +209,7 @@ export default function VideoPreview({ baseUrl, maskUrl, state, onBufferWarmup, 
         overflow: "hidden",
         position: "relative",
       }}>
-        {!baseUrl && (
+        {!videoUrl && (
           <div style={{
             position: "absolute",
             inset: 0,
@@ -252,8 +226,9 @@ export default function VideoPreview({ baseUrl, maskUrl, state, onBufferWarmup, 
             pointerEvents: "none",
           }}>
             <div style={{ fontSize: "32px", opacity: 0.4 }}>▶</div>
-            <div>LOAD BASE VIDEO</div>
-            <div style={{ fontSize: "10px", opacity: 0.6 }}>or drag & drop a video file here</div>
+            <div>LOAD HSTACK VIDEO</div>
+            <div style={{ fontSize: "10px", opacity: 0.6 }}>base | mask — side by side</div>
+            <div style={{ fontSize: "10px", opacity: 0.4 }}>or drag & drop here</div>
           </div>
         )}
         <canvas
@@ -261,7 +236,7 @@ export default function VideoPreview({ baseUrl, maskUrl, state, onBufferWarmup, 
           style={{
             maxWidth: "100%",
             maxHeight: "100%",
-            display: baseUrl ? "block" : "none",
+            display: videoUrl ? "block" : "none",
             imageRendering: "pixelated",
           }}
         />
@@ -281,13 +256,13 @@ export default function VideoPreview({ baseUrl, maskUrl, state, onBufferWarmup, 
         {/* Play/Pause */}
         <button
           onClick={togglePlay}
-          disabled={!baseUrl}
+          disabled={!videoUrl}
           style={{
             background: "none",
             border: "none",
-            color: baseUrl ? "#4ecdc4" : "rgba(78,205,196,0.2)",
+            color: videoUrl ? "#4ecdc4" : "rgba(78,205,196,0.2)",
             fontSize: "16px",
-            cursor: baseUrl ? "pointer" : "default",
+            cursor: videoUrl ? "pointer" : "default",
             padding: "0 4px",
             fontFamily: "monospace",
             lineHeight: 1,
@@ -306,7 +281,7 @@ export default function VideoPreview({ baseUrl, maskUrl, state, onBufferWarmup, 
             step={1 / 30}
             value={currentTime}
             onChange={handleScrub}
-            disabled={!baseUrl}
+            disabled={!videoUrl}
             style={{ width: "100%" }}
           />
         </div>
@@ -342,23 +317,15 @@ export default function VideoPreview({ baseUrl, maskUrl, state, onBufferWarmup, 
         </button>
       </div>
 
-      {/* Hidden video elements */}
+      {/* Single hidden video element — decodes the full hstack stream */}
       <video
-        ref={baseVideoRef}
+        ref={videoRef}
         loop={isLooping}
         muted
         playsInline
         crossOrigin="anonymous"
         style={{ display: "none" }}
         onEnded={() => setIsPlaying(false)}
-      />
-      <video
-        ref={maskVideoRef}
-        loop={isLooping}
-        muted
-        playsInline
-        crossOrigin="anonymous"
-        style={{ display: "none" }}
       />
     </div>
   );

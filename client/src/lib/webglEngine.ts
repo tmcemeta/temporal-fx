@@ -4,15 +4,23 @@
 // restriction on dynamic sampler array indexing.
 //
 // Atlas layout:
-//   - Width:  videoWidth  * ATLAS_COLS
-//   - Height: videoHeight * ATLAS_ROWS
+//   - Width:  frameWidth  * ATLAS_COLS
+//   - Height: frameHeight * ATLAS_ROWS
 //   - Frame f occupies tile (col = f % ATLAS_COLS, row = f / ATLAS_COLS)
 //
-// IMPORTANT: All textures used as FBO attachments (baseFrameTexture,
-// compositeTexture, prevFrameTexture, atlases) MUST be pre-allocated with
+// HSTACK VIDEO FORMAT:
+//   The engine accepts a single <video> element whose decoded frames are
+//   side-by-side: left half = base, right half = mask.
+//   Produced by: ffmpeg -y -i "$BASE" -i "$MASK" -filter_complex hstack "$OUT"
+//
+//   Splitting is done via WebGL2 pixel unpack parameters — no CPU copy needed:
+//     UNPACK_ROW_LENGTH  = hstackWidth  (full decoded frame stride)
+//     UNPACK_SKIP_PIXELS = 0            → left half  (base)
+//     UNPACK_SKIP_PIXELS = frameWidth   → right half (mask)
+//   After each upload both parameters are reset to 0.
+//
+// IMPORTANT: All textures used as FBO attachments MUST be pre-allocated with
 // explicit dimensions via texImage2D(null) before copyTexSubImage2D is called.
-// Using texImage2D(video) alone does NOT guarantee the texture has storage
-// allocated in a way that is safe for FBO attachment.
 
 import type { FXState } from "./types";
 import {
@@ -52,7 +60,7 @@ export class TemporalFXEngine {
   private compositeFBO!: WebGLFramebuffer;
   private compositeTexture!: WebGLTexture;
 
-  // Per-frame textures (pre-allocated to video dimensions)
+  // Per-frame textures (pre-allocated to logical frame dimensions)
   private baseFrameTexture!: WebGLTexture;
   private maskFrameTexture!: WebGLTexture;
   private prevFrameTexture!: WebGLTexture;
@@ -60,6 +68,7 @@ export class TemporalFXEngine {
   // Reusable FBO for copy operations
   private copyFBO!: WebGLFramebuffer;
 
+  // Logical frame dimensions (half the hstack video width)
   private width = 0;
   private height = 0;
 
@@ -88,7 +97,6 @@ export class TemporalFXEngine {
       "u_weightCurve", "u_weightCurveLen",
       "u_excludeMask", "u_maskTex", "u_numMaskExcludeColors",
     ]);
-    // Register mask exclude color array uniforms
     for (let i = 0; i < 5; i++) {
       this.compositeProgram.uniforms[`u_maskExcludeColors[${i}]`] =
         gl.getUniformLocation(this.compositeProgram.program, `u_maskExcludeColors[${i}]`);
@@ -201,6 +209,64 @@ export class TemporalFXEngine {
     }
   }
 
+  /**
+   * Upload one half of an hstack video frame into a pre-allocated texture.
+   *
+   * WebGL2's UNPACK_ROW_LENGTH tells the driver how many pixels wide each row
+   * of the source image is. UNPACK_SKIP_PIXELS offsets the start of each row.
+   * Together they let us address either half of the hstack frame without any
+   * CPU-side copy or intermediate canvas.
+   *
+   * @param tex         Pre-allocated destination texture (frameWidth × frameHeight)
+   * @param video       The hstack <video> element (decoded width = frameWidth * 2)
+   * @param frameWidth  Logical width of one half (= video.videoWidth / 2)
+   * @param skipPixels  0 for the left (base) half; frameWidth for the right (mask) half
+   */
+  private uploadHalfFrame(
+    tex: WebGLTexture,
+    video: HTMLVideoElement,
+    frameWidth: number,
+    skipPixels: number,
+  ) {
+    const gl = this.gl;
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+
+    // Set unpack parameters to read one half of the hstack frame
+    gl.pixelStorei(gl.UNPACK_ROW_LENGTH, frameWidth * 2);
+    gl.pixelStorei(gl.UNPACK_SKIP_PIXELS, skipPixels);
+
+    gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, frameWidth, this.height, gl.RGBA, gl.UNSIGNED_BYTE, video);
+
+    // Always reset to defaults to avoid affecting subsequent uploads
+    gl.pixelStorei(gl.UNPACK_ROW_LENGTH, 0);
+    gl.pixelStorei(gl.UNPACK_SKIP_PIXELS, 0);
+  }
+
+  /**
+   * Copy a texture into a specific tile of the atlas using copyTexSubImage2D.
+   * The source texture must be pre-allocated and attached to copyFBO.
+   */
+  private copyToAtlasTile(srcTex: WebGLTexture, atlasTex: WebGLTexture, slot: number) {
+    const gl = this.gl;
+    const col = slot % ATLAS_COLS;
+    const row = Math.floor(slot / ATLAS_COLS);
+    const xOffset = col * this.width;
+    const yOffset = row * this.height;
+
+    gl.bindFramebuffer(gl.READ_FRAMEBUFFER, this.copyFBO);
+    gl.framebufferTexture2D(gl.READ_FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, srcTex, 0);
+
+    const status = gl.checkFramebufferStatus(gl.READ_FRAMEBUFFER);
+    if (status !== gl.FRAMEBUFFER_COMPLETE) {
+      gl.bindFramebuffer(gl.READ_FRAMEBUFFER, null);
+      return; // Skip silently — can happen on first frame before textures are ready
+    }
+
+    gl.bindTexture(gl.TEXTURE_2D, atlasTex);
+    gl.copyTexSubImage2D(gl.TEXTURE_2D, 0, xOffset, yOffset, 0, 0, this.width, this.height);
+    gl.bindFramebuffer(gl.READ_FRAMEBUFFER, null);
+  }
+
   resize(width: number, height: number) {
     if (this.width === width && this.height === height) return;
     const gl = this.gl;
@@ -234,58 +300,26 @@ export class TemporalFXEngine {
   }
 
   /**
-   * Upload a video frame into a pre-allocated texture using texSubImage2D.
-   * Requires the texture to already have storage allocated (via allocTexture).
+   * Render one frame from an hstack-encoded video element.
+   *
+   * @param hstackVideo  The <video> element; videoWidth = frameWidth * 2
+   * @param state        Current FX parameters
+   *
+   * The engine derives frameWidth = videoWidth / 2 and uses UNPACK_ROW_LENGTH
+   * to upload the left half as the base frame and the right half as the mask frame.
+   * The mask is always present when an hstack video is loaded — the overlay shader
+   * receives u_hasMask = true unconditionally.
    */
-  private uploadVideoFrame(tex: WebGLTexture, video: HTMLVideoElement) {
-    const gl = this.gl;
-    gl.bindTexture(gl.TEXTURE_2D, tex);
-    // texSubImage2D is safe as long as the texture was pre-allocated
-    gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, gl.RGBA, gl.UNSIGNED_BYTE, video);
-  }
-
-  /**
-   * Copy a texture into a specific tile of the atlas using copyTexSubImage2D.
-   * The source texture must be pre-allocated and attached to copyFBO.
-   */
-  private copyToAtlasTile(srcTex: WebGLTexture, atlasTex: WebGLTexture, slot: number) {
-    const gl = this.gl;
-    const col = slot % ATLAS_COLS;
-    const row = Math.floor(slot / ATLAS_COLS);
-    const xOffset = col * this.width;
-    const yOffset = row * this.height;
-
-    gl.bindFramebuffer(gl.READ_FRAMEBUFFER, this.copyFBO);
-    gl.framebufferTexture2D(gl.READ_FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, srcTex, 0);
-
-    // Verify FBO is complete before copying
-    const status = gl.checkFramebufferStatus(gl.READ_FRAMEBUFFER);
-    if (status !== gl.FRAMEBUFFER_COMPLETE) {
-      gl.bindFramebuffer(gl.READ_FRAMEBUFFER, null);
-      return; // Skip silently — can happen on first frame before textures are ready
-    }
-
-    gl.bindTexture(gl.TEXTURE_2D, atlasTex);
-    gl.copyTexSubImage2D(gl.TEXTURE_2D, 0, xOffset, yOffset, 0, 0, this.width, this.height);
-    gl.bindFramebuffer(gl.READ_FRAMEBUFFER, null);
-  }
-
-  renderFrame(
-    baseVideo: HTMLVideoElement,
-    maskVideo: HTMLVideoElement | null,
-    state: FXState
-  ) {
+  renderFrame(hstackVideo: HTMLVideoElement, state: FXState) {
     const gl = this.gl;
     if (!this.width || !this.height) return;
+    if (hstackVideo.readyState < 2) return;
 
-    // Guard: video must have decoded at least one frame
-    if (baseVideo.readyState < 2) return;
+    const frameWidth = this.width; // already set to videoWidth / 2 by resize()
 
-    // 1. Upload current base frame
-    this.uploadVideoFrame(this.baseFrameTexture, baseVideo);
-    if (maskVideo && maskVideo.readyState >= 2) {
-      this.uploadVideoFrame(this.maskFrameTexture, maskVideo);
-    }
+    // 1. Upload both halves of the hstack frame
+    this.uploadHalfFrame(this.baseFrameTexture, hstackVideo, frameWidth, 0);
+    this.uploadHalfFrame(this.maskFrameTexture, hstackVideo, frameWidth, frameWidth);
 
     // 2. Build slot-indexed weight array
     const depth = Math.min(state.historyDepth, this.historyFilled);
@@ -299,9 +333,9 @@ export class TemporalFXEngine {
       slotWeights[slot] = weightLUT[wIdx];
     }
 
-    // Chromatic spread: compute atlas slots for R and B offsets
+    // Chromatic spread: compute atlas slots for R and B channel offsets
     const chromROffset = Math.min(Math.round(state.chromaticSpread), Math.max(depth - 1, 0));
-    const chromBOffset = Math.min(Math.round(state.chromaticSpread * 2), Math.max(depth - 1, 0));
+    const chromBOffset = Math.min(Math.round(state.chromaticSpread * 1.5), Math.max(depth - 1, 0));
     const chromRSlot = depth > 0
       ? ((this.historyHead - 1 - chromROffset) % MAX_HISTORY + MAX_HISTORY) % MAX_HISTORY
       : -1;
@@ -351,12 +385,11 @@ export class TemporalFXEngine {
     gl.uniform1i(this.compositeProgram.uniforms["u_chromB"],
       state.chromaticSpread > 0 ? chromBSlot : -1);
 
-    // Active mask count (shared by composite exclusion and overlay passes)
     const activeMaskCount = Math.min(state.maskCount ?? 1, 5);
 
-    // Mask exclusion uniforms
+    // Mask exclusion uniforms — mask is always present in hstack format
     gl.uniform1i(this.compositeProgram.uniforms["u_excludeMask"],
-      state.excludeMaskFromEffect && maskVideo ? 1 : 0);
+      state.excludeMaskFromEffect ? 1 : 0);
     gl.activeTexture(gl.TEXTURE3);
     gl.bindTexture(gl.TEXTURE_2D, this.maskFrameTexture);
     gl.uniform1i(this.compositeProgram.uniforms["u_maskTex"], 3);
@@ -386,7 +419,8 @@ export class TemporalFXEngine {
     gl.bindTexture(gl.TEXTURE_2D, this.maskFrameTexture);
     gl.uniform1i(this.overlayProgram.uniforms["u_maskVideo"], 2);
 
-    gl.uniform1i(this.overlayProgram.uniforms["u_hasMask"], maskVideo ? 1 : 0);
+    // Mask is always present in hstack format
+    gl.uniform1i(this.overlayProgram.uniforms["u_hasMask"], 1);
     for (let i = 0; i < 5; i++) {
       const c = state.maskColors[i];
       gl.uniform3f(this.overlayProgram.uniforms[`u_maskColors[${i}]`], c.r, c.g, c.b);

@@ -1,6 +1,10 @@
 // TEMPORAL FX — ControlPanel Component
 // "Cinematic Void" design: dark panel, teal section headers, DM Mono typography.
-// Contains all 8 FX parameters + mask colors + presets + save/load state.
+// Contains all FX parameters + mask colors + presets + save/load state.
+//
+// Media section: single "Load Video" button for hstack-encoded files.
+// The mask color picker and related controls remain — they drive the chroma-key
+// compositing in the overlay shader, which still operates on the mask half.
 
 import React, { useRef } from "react";
 import type { FXState, BlendMode, PixelWeightMode } from "@/lib/types";
@@ -11,12 +15,9 @@ import MaskColorPicker from "./MaskColorPicker";
 interface Props {
   state: FXState;
   onChange: (patch: Partial<FXState>) => void;
-  onLoadBase: () => void;
-  onLoadMask: () => void;
-  hasBase: boolean;
-  hasMask: boolean;
-  baseFileName: string;
-  maskFileName: string;
+  onLoadVideo: () => void;
+  hasVideo: boolean;
+  videoFileName: string;
   bufferWarmup: number; // 0..1, how full the history buffer is
 }
 
@@ -96,12 +97,9 @@ function SliderRow({
 export default function ControlPanel({
   state,
   onChange,
-  onLoadBase,
-  onLoadMask,
-  hasBase,
-  hasMask,
-  baseFileName,
-  maskFileName,
+  onLoadVideo,
+  hasVideo,
+  videoFileName,
   bufferWarmup,
 }: Props) {
   const saveRef = useRef<HTMLAnchorElement>(null);
@@ -176,16 +174,16 @@ export default function ControlPanel({
         }}>v1.0</span>
       </div>
 
-      {/* Media Load */}
+      {/* Media Load — single hstack video */}
       <div style={SECTION_STYLE}>
         <span style={LABEL_STYLE}>Media</span>
         <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
           <button
-            onClick={onLoadBase}
+            onClick={onLoadVideo}
             style={{
-              background: hasBase ? "rgba(78,205,196,0.08)" : "rgba(255,255,255,0.04)",
-              border: `1px solid ${hasBase ? "rgba(78,205,196,0.4)" : "rgba(255,255,255,0.1)"}`,
-              color: hasBase ? "#4ecdc4" : "rgba(232,232,232,0.5)",
+              background: hasVideo ? "rgba(78,205,196,0.08)" : "rgba(255,255,255,0.04)",
+              border: `1px solid ${hasVideo ? "rgba(78,205,196,0.4)" : "rgba(255,255,255,0.1)"}`,
+              color: hasVideo ? "#4ecdc4" : "rgba(232,232,232,0.5)",
               padding: "7px 10px",
               fontFamily: "'DM Mono', monospace",
               fontSize: "11px",
@@ -198,103 +196,93 @@ export default function ControlPanel({
               whiteSpace: "nowrap",
             }}
           >
-            {hasBase ? `✓ ${baseFileName}` : "Load Base Video"}
+            {hasVideo ? `✓ ${videoFileName}` : "Load Video  (hstack)"}
           </button>
-          <button
-            onClick={onLoadMask}
-            style={{
-              background: hasMask ? "rgba(78,205,196,0.08)" : "rgba(255,255,255,0.04)",
-              border: `1px solid ${hasMask ? "rgba(78,205,196,0.4)" : "rgba(255,255,255,0.1)"}`,
-              color: hasMask ? "#4ecdc4" : "rgba(232,232,232,0.5)",
-              padding: "7px 10px",
-              fontFamily: "'DM Mono', monospace",
-              fontSize: "11px",
-              cursor: "pointer",
-              borderRadius: "2px",
-              textAlign: "left",
-              transition: "all 0.15s",
-              overflow: "hidden",
-              textOverflow: "ellipsis",
-              whiteSpace: "nowrap",
-            }}
-          >
-            {hasMask ? `✓ ${maskFileName}` : "Load Mask Video (optional)"}
-          </button>
-          {hasMask && (
-            <div style={{ marginTop: "6px" }}>
-              {/* Mask count slider */}
-              <div style={{ ...ROW_STYLE, marginBottom: "8px" }}>
-                <span style={PARAM_LABEL}>Mask Colors</span>
-                <input
-                  type="range"
-                  min={1}
-                  max={5}
-                  step={1}
-                  value={state.maskCount ?? 1}
-                  onChange={e => onChange({ maskCount: parseInt(e.target.value) })}
-                  style={{ flex: 1 }}
-                />
-                <span style={VALUE_STYLE}>{state.maskCount ?? 1}</span>
-              </div>
 
-              {/* Exclude mask toggle */}
-              <button
-                onClick={() => onChange({ excludeMaskFromEffect: !state.excludeMaskFromEffect })}
-                style={{
-                  width: "100%",
-                  background: state.excludeMaskFromEffect
-                    ? "rgba(78,205,196,0.12)"
-                    : "rgba(255,255,255,0.03)",
-                  border: `1px solid ${
-                    state.excludeMaskFromEffect
-                      ? "rgba(78,205,196,0.5)"
-                      : "rgba(255,255,255,0.1)"
-                  }`,
-                  color: state.excludeMaskFromEffect
-                    ? "#4ecdc4"
-                    : "rgba(232,232,232,0.45)",
-                  padding: "6px 10px",
-                  fontFamily: "'DM Mono', monospace",
-                  fontSize: "10px",
-                  cursor: "pointer",
-                  borderRadius: "2px",
-                  textAlign: "left" as const,
-                  letterSpacing: "0.08em",
-                  transition: "all 0.15s",
-                  display: "flex",
-                  alignItems: "center",
-                  gap: "7px",
-                  marginBottom: "6px",
-                }}
-              >
-                <span style={{
-                  width: "10px",
-                  height: "10px",
-                  borderRadius: "2px",
-                  border: `1px solid ${
-                    state.excludeMaskFromEffect
-                      ? "#4ecdc4"
-                      : "rgba(255,255,255,0.2)"
-                  }`,
-                  background: state.excludeMaskFromEffect
-                    ? "#4ecdc4"
-                    : "transparent",
-                  display: "inline-block",
-                  flexShrink: 0,
-                  transition: "all 0.15s",
-                }} />
-                Exclude Mask from Effect
-              </button>
-              <MaskColorPicker
-                colors={state.maskColors.slice(0, state.maskCount ?? 1)}
-                onChange={(i, color) => {
-                  const newColors = [...state.maskColors];
-                  newColors[i] = color;
-                  onChange({ maskColors: newColors });
-                }}
+          {/* Hint line */}
+          <div style={{
+            fontFamily: "'DM Mono', monospace",
+            fontSize: "9px",
+            color: "rgba(78,205,196,0.3)",
+            letterSpacing: "0.06em",
+            paddingLeft: "2px",
+          }}>
+            base | mask — side by side
+          </div>
+
+          {/* Mask color controls — always shown; they key against the mask half */}
+          <div style={{ marginTop: "6px" }}>
+            <div style={{ ...ROW_STYLE, marginBottom: "8px" }}>
+              <span style={PARAM_LABEL}>Mask Colors</span>
+              <input
+                type="range"
+                min={1}
+                max={5}
+                step={1}
+                value={state.maskCount ?? 1}
+                onChange={e => onChange({ maskCount: parseInt(e.target.value) })}
+                style={{ flex: 1 }}
               />
+              <span style={VALUE_STYLE}>{state.maskCount ?? 1}</span>
             </div>
-          )}
+
+            <button
+              onClick={() => onChange({ excludeMaskFromEffect: !state.excludeMaskFromEffect })}
+              style={{
+                width: "100%",
+                background: state.excludeMaskFromEffect
+                  ? "rgba(78,205,196,0.12)"
+                  : "rgba(255,255,255,0.03)",
+                border: `1px solid ${
+                  state.excludeMaskFromEffect
+                    ? "rgba(78,205,196,0.5)"
+                    : "rgba(255,255,255,0.1)"
+                }`,
+                color: state.excludeMaskFromEffect
+                  ? "#4ecdc4"
+                  : "rgba(232,232,232,0.45)",
+                padding: "6px 10px",
+                fontFamily: "'DM Mono', monospace",
+                fontSize: "10px",
+                cursor: "pointer",
+                borderRadius: "2px",
+                textAlign: "left" as const,
+                letterSpacing: "0.08em",
+                transition: "all 0.15s",
+                display: "flex",
+                alignItems: "center",
+                gap: "7px",
+                marginBottom: "6px",
+              }}
+            >
+              <span style={{
+                width: "10px",
+                height: "10px",
+                borderRadius: "2px",
+                border: `1px solid ${
+                  state.excludeMaskFromEffect
+                    ? "#4ecdc4"
+                    : "rgba(255,255,255,0.2)"
+                }`,
+                background: state.excludeMaskFromEffect
+                  ? "#4ecdc4"
+                  : "transparent",
+                display: "inline-block",
+                flexShrink: 0,
+                transition: "all 0.15s",
+              }} />
+              Exclude Mask from Effect
+            </button>
+
+            <MaskColorPicker
+              colors={state.maskColors.slice(0, state.maskCount ?? 1)}
+              onChange={(i, color) => {
+                const newColors = [...state.maskColors];
+                newColors[i] = color;
+                onChange({ maskColors: newColors });
+              }}
+            />
+          </div>
         </div>
       </div>
 
