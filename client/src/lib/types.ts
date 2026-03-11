@@ -15,6 +15,15 @@ export interface RGBColor {
 // 3 = Raw Input (show only one half of the hstack at a time; toggled separately)
 export type ViewMode = 0 | 1 | 2 | 3;
 
+// Normalized bounding box: all values in [0..1] UV space.
+// x1 > x2 (or y1 > y2) means no subject was found for that color slot.
+export interface BBox {
+  x1: number;
+  y1: number;
+  x2: number;
+  y2: number;
+}
+
 export interface SubjectState {
   // How many mask color slots are active (1..5)
   maskCount: number;
@@ -48,6 +57,13 @@ export interface SubjectState {
 
   // For Raw Input view: which half to show (true = base/left, false = mask/right)
   rawInputShowBase: boolean;
+
+  // Bounding box overlay toggle
+  showBbox: boolean;
+
+  // Number of grid samples per axis for bbox computation (10..100)
+  // Total samples = (bboxSamples+1)^2; recompiles the bbox shader on change.
+  bboxSamples: number;
 }
 
 export const DEFAULT_STATE: SubjectState = {
@@ -66,4 +82,6 @@ export const DEFAULT_STATE: SubjectState = {
   viewMode: 0,
   isHstack: true,
   rawInputShowBase: true,
+  showBbox: false,
+  bboxSamples: 50,
 };

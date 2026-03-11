@@ -160,3 +160,63 @@ void main() {
   fragColor = vec4(outRgb, outA);
 }
 `;
+
+// ─── Bounding Box Shader ──────────────────────────────────────────────────────
+// Computes the normalized bounding box of pixels in u_maskVideo that match
+// a single key color (u_bboxColor), using the same color-match logic as the
+// subject shader. Outputs a 1×1 texture with vec4(x1, y1, x2, y2) in [0..1].
+//
+// Runs once per active mask color slot. The CPU reads back the 1×1 pixel to
+// get the bbox coordinates, then draws the overlay on a 2D canvas.
+//
+// Based on the IGLU bbox compute shader spec, adapted for WebGL2 fragment shaders.
+// BBOX_SAMPLES is injected at program creation time so it can be driven by a
+// uniform-like slider without recompiling (we do recompile on change, which is
+// acceptable since it only happens on slider release, not per-frame).
+export const makeBboxShader = (samples: number) => `#version 300 es
+precision highp float;
+
+// No varying needed — this shader ignores its fragment coordinate entirely.
+// It loops over a fixed grid of UV samples and accumulates the bbox.
+in vec2 v_texCoord;
+out vec4 fragColor;
+
+uniform sampler2D u_maskVideo;
+uniform vec3 u_bboxColor;       // the single key color to match for this bbox pass
+uniform float u_edgeSoftness;   // same tolerance as the subject shader
+uniform float u_minLuma;        // same luma gate as the subject shader
+#define BBOX_SAMPLES ${samples}
+#define MIN_ALPHA 0.01
+
+float getLuma(vec3 c) {
+  return dot(c, vec3(0.2126, 0.7152, 0.0722));
+}
+
+void main() {
+  vec2 bbMin = vec2(1.0);
+  vec2 bbMax = vec2(0.0);
+
+  for (int x = 0; x <= BBOX_SAMPLES; ++x) {
+    for (int y = 0; y <= BBOX_SAMPLES; ++y) {
+      vec2 st = vec2(x, y) / float(BBOX_SAMPLES);
+      vec4 maskSample = texture(u_maskVideo, st);
+
+      float luma = getLuma(maskSample.rgb);
+      float lumaGate = smoothstep(u_minLuma, u_minLuma + 0.1, luma);
+      float maskDiff = length(maskSample.rgb - u_bboxColor);
+      float alpha = (1.0 - smoothstep(0.0, u_edgeSoftness, maskDiff)) * lumaGate;
+
+      if (alpha > MIN_ALPHA) {
+        bbMin.x = min(bbMin.x, st.x);
+        bbMin.y = min(bbMin.y, st.y);
+        bbMax.x = max(bbMax.x, st.x);
+        bbMax.y = max(bbMax.y, st.y);
+      }
+    }
+  }
+
+  // Output: normalized bbox corners as vec4(x1, y1, x2, y2)
+  // If no pixels matched, bbMin > bbMax — the CPU treats this as "no subject".
+  fragColor = vec4(bbMin.x, bbMin.y, bbMax.x, bbMax.y);
+}
+`;

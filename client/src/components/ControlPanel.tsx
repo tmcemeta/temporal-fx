@@ -374,6 +374,31 @@ export default function ControlPanel({
         )}
       </div>
 
+      {/* Bounding Box */}
+      <div style={SECTION_STYLE}>
+        <span style={LABEL_STYLE}>Bounding Box</span>
+
+        <ToggleRow
+          label="Show BBox Overlay"
+          hint="draws a labeled rectangle per active mask color"
+          active={state.showBbox}
+          onToggle={() => onChange({ showBbox: !state.showBbox })}
+        />
+
+        {state.showBbox && (
+          <SliderRow
+            label="BBox Samples"
+            hint={`${(state.bboxSamples + 1) ** 2} total samples per color`}
+            value={state.bboxSamples}
+            min={10}
+            max={100}
+            step={5}
+            onChange={v => onChange({ bboxSamples: v })}
+            display={`${state.bboxSamples}`}
+          />
+        )}
+      </div>
+
       {/* Keyboard shortcuts */}
       <div style={{ padding: "8px 14px", borderBottom: "1px solid rgba(78,205,196,0.06)" }}>
         <div style={{ display: "flex", gap: "16px", flexWrap: "wrap" }}>

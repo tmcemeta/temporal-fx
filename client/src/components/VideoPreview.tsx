@@ -1,12 +1,17 @@
 // SIMPLE SUBJECT — VideoPreview Component
-// Hosts the WebGL canvas, a single hidden video element, and playback controls.
+// Hosts the WebGL canvas, a 2D overlay canvas for bbox drawing,
+// a single hidden video element, and playback controls.
 // Runs the render loop via requestAnimationFrame.
 //
 // Video format: hstack-encoded (base = left half, mask = right half).
 // A single <video> element decodes both halves in lockstep — no drift is possible.
+//
+// Bbox overlay: a transparent 2D canvas is stacked on top of the WebGL canvas.
+// After each frame, the engine returns per-color BBox results which are drawn
+// as labeled rectangles using each mask color.
 
 import React, { useRef, useEffect, useCallback, useState } from "react";
-import type { SubjectState } from "@/lib/types";
+import type { SubjectState, BBox, RGBColor } from "@/lib/types";
 import { SubjectEngine } from "@/lib/subjectEngine";
 
 interface Props {
@@ -15,8 +20,19 @@ interface Props {
   onDropVideo?: (file: File) => void;
 }
 
+function rgbToCss(c: RGBColor, alpha = 1): string {
+  return `rgba(${Math.round(c.r * 255)},${Math.round(c.g * 255)},${Math.round(c.b * 255)},${alpha})`;
+}
+
+// Choose a contrasting label color (black or white) based on luma
+function labelColor(c: RGBColor): string {
+  const luma = 0.2126 * c.r + 0.7152 * c.g + 0.0722 * c.b;
+  return luma > 0.4 ? "rgba(0,0,0,0.9)" : "rgba(255,255,255,0.9)";
+}
+
 export default function VideoPreview({ videoUrl, state, onDropVideo }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const overlayRef = useRef<HTMLCanvasElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
   const engineRef = useRef<SubjectEngine | null>(null);
   const rafRef = useRef<number>(0);
@@ -51,6 +67,85 @@ export default function VideoPreview({ videoUrl, state, onDropVideo }: Props) {
     };
   }, []);
 
+  // Draw bbox overlay on the 2D canvas
+  const drawBboxOverlay = useCallback((
+    bboxes: Array<BBox | null>,
+    colors: RGBColor[],
+    canvasW: number,
+    canvasH: number,
+  ) => {
+    const overlay = overlayRef.current;
+    if (!overlay) return;
+    const ctx = overlay.getContext("2d");
+    if (!ctx) return;
+
+    // Match overlay dimensions to the WebGL canvas display size
+    if (overlay.width !== canvasW || overlay.height !== canvasH) {
+      overlay.width = canvasW;
+      overlay.height = canvasH;
+    }
+
+    ctx.clearRect(0, 0, canvasW, canvasH);
+
+    bboxes.forEach((bbox, i) => {
+      if (!bbox) return;
+      const color = colors[i];
+
+      const x = bbox.x1 * canvasW;
+      const y = (1 - bbox.y2) * canvasH; // flip Y: WebGL UV origin is bottom-left
+      const w = (bbox.x2 - bbox.x1) * canvasW;
+      const h = (bbox.y2 - bbox.y1) * canvasH;
+
+      // Outer glow / shadow for visibility on any background
+      ctx.shadowColor = "rgba(0,0,0,0.7)";
+      ctx.shadowBlur = 4;
+
+      // Rectangle stroke in mask color
+      ctx.strokeStyle = rgbToCss(color, 0.9);
+      ctx.lineWidth = 1.5;
+      ctx.strokeRect(x, y, w, h);
+
+      ctx.shadowBlur = 0;
+
+      // Corner accents (L-shaped ticks at each corner)
+      const tick = Math.min(w, h) * 0.12;
+      ctx.strokeStyle = rgbToCss(color, 1);
+      ctx.lineWidth = 2;
+      const corners: [number, number, number, number][] = [
+        [x, y, tick, tick],
+        [x + w, y, -tick, tick],
+        [x, y + h, tick, -tick],
+        [x + w, y + h, -tick, -tick],
+      ];
+      corners.forEach(([cx, cy, dx, dy]) => {
+        ctx.beginPath();
+        ctx.moveTo(cx + dx, cy);
+        ctx.lineTo(cx, cy);
+        ctx.lineTo(cx, cy + dy);
+        ctx.stroke();
+      });
+
+      // Label: slot number + pixel dimensions
+      const pw = Math.round(w);
+      const ph = Math.round(h);
+      const label = `${i + 1}  ${pw}×${ph}`;
+      ctx.font = "bold 10px 'DM Mono', monospace";
+      const textW = ctx.measureText(label).width;
+      const labelX = x;
+      const labelY = y > 16 ? y - 4 : y + h + 13;
+
+      // Label background pill
+      ctx.fillStyle = rgbToCss(color, 0.85);
+      ctx.beginPath();
+      ctx.roundRect(labelX - 2, labelY - 11, textW + 8, 14, 2);
+      ctx.fill();
+
+      // Label text
+      ctx.fillStyle = labelColor(color);
+      ctx.fillText(label, labelX + 2, labelY);
+    });
+  }, []);
+
   // Render loop
   const renderLoop = useCallback(() => {
     const engine = engineRef.current;
@@ -78,11 +173,29 @@ export default function VideoPreview({ videoUrl, state, onDropVideo }: Props) {
       engine.resize(fw, fh);
     }
 
-    engine.renderFrame(video, s);
+    const bboxes = engine.renderFrame(video, s);
     setCurrentTime(video.currentTime);
 
+    // Draw bbox overlay if enabled
+    const glCanvas = canvasRef.current;
+    if (s.showBbox && bboxes.length > 0 && glCanvas) {
+      drawBboxOverlay(
+        bboxes,
+        s.maskColors.slice(0, s.maskCount),
+        glCanvas.clientWidth,
+        glCanvas.clientHeight,
+      );
+    } else {
+      // Clear overlay when bbox is off
+      const overlay = overlayRef.current;
+      if (overlay) {
+        const ctx = overlay.getContext("2d");
+        ctx?.clearRect(0, 0, overlay.width, overlay.height);
+      }
+    }
+
     rafRef.current = requestAnimationFrame(renderLoop);
-  }, []);
+  }, [drawBboxOverlay]);
 
   useEffect(() => {
     rafRef.current = requestAnimationFrame(renderLoop);
@@ -208,6 +321,8 @@ export default function VideoPreview({ videoUrl, state, onDropVideo }: Props) {
             <div style={{ fontSize: "10px", opacity: 0.4 }}>or drag & drop here</div>
           </div>
         )}
+
+        {/* WebGL canvas */}
         <canvas
           ref={canvasRef}
           style={{
@@ -216,6 +331,20 @@ export default function VideoPreview({ videoUrl, state, onDropVideo }: Props) {
             aspectRatio: `${aspectRatio}`,
             display: videoUrl ? "block" : "none",
             imageRendering: "pixelated",
+            position: "relative",
+          }}
+        />
+
+        {/* 2D overlay canvas for bbox drawing — sits exactly on top of the WebGL canvas */}
+        <canvas
+          ref={overlayRef}
+          style={{
+            position: "absolute",
+            maxWidth: "100%",
+            maxHeight: "100%",
+            aspectRatio: `${aspectRatio}`,
+            display: videoUrl ? "block" : "none",
+            pointerEvents: "none",
           }}
         />
       </div>
