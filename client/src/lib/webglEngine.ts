@@ -13,11 +13,13 @@
 //   side-by-side: left half = base, right half = mask.
 //   Produced by: ffmpeg -y -i "$BASE" -i "$MASK" -filter_complex hstack "$OUT"
 //
-//   Splitting is done via WebGL2 pixel unpack parameters — no CPU copy needed:
-//     UNPACK_ROW_LENGTH  = hstackWidth  (full decoded frame stride)
-//     UNPACK_SKIP_PIXELS = 0            → left half  (base)
-//     UNPACK_SKIP_PIXELS = frameWidth   → right half (mask)
-//   After each upload both parameters are reset to 0.
+//   NOTE: WebGL 2 spec §5.35 states that UNPACK_ROW_LENGTH is IGNORED when the
+//   upload source is a TexImageSource (HTMLVideoElement, HTMLCanvasElement, etc.).
+//   Splitting is therefore done via a persistent off-screen OffscreenCanvas:
+//     splitCtx.drawImage(video, -frameWidth, 0)  → left half  (base)
+//     splitCtx.drawImage(video, 0,           0)  → right half (mask)
+//   The canvas is then uploaded to the texture with texSubImage2D.
+//   The OffscreenCanvas is created once in resize() and reused every frame.
 //
 // IMPORTANT: All textures used as FBO attachments MUST be pre-allocated with
 // explicit dimensions via texImage2D(null) before copyTexSubImage2D is called.
@@ -67,6 +69,11 @@ export class TemporalFXEngine {
 
   // Reusable FBO for copy operations
   private copyFBO!: WebGLFramebuffer;
+
+  // Off-screen canvas used to split the hstack frame into two halves.
+  // Created/resized in resize(). drawImage offsets select the correct half.
+  private splitCanvas: OffscreenCanvas | null = null;
+  private splitCtx: OffscreenCanvasRenderingContext2D | null = null;
 
   // Logical frame dimensions (half the hstack video width)
   private width = 0;
@@ -210,36 +217,31 @@ export class TemporalFXEngine {
   }
 
   /**
-   * Upload one half of an hstack video frame into a pre-allocated texture.
+   * Draw one half of the hstack video into splitCanvas, then upload to tex.
    *
-   * WebGL2's UNPACK_ROW_LENGTH tells the driver how many pixels wide each row
-   * of the source image is. UNPACK_SKIP_PIXELS offsets the start of each row.
-   * Together they let us address either half of the hstack frame without any
-   * CPU-side copy or intermediate canvas.
+   * The splitCanvas is frameWidth × frameHeight. drawImage is called with an
+   * x-offset so that only the desired half of the hstack frame is visible:
+   *   isLeft=true  → drawX = 0           (base, left half)
+   *   isLeft=false → drawX = -frameWidth (mask, right half)
    *
-   * @param tex         Pre-allocated destination texture (frameWidth × frameHeight)
-   * @param video       The hstack <video> element (decoded width = frameWidth * 2)
-   * @param frameWidth  Logical width of one half (= video.videoWidth / 2)
-   * @param skipPixels  0 for the left (base) half; frameWidth for the right (mask) half
+   * The canvas is then uploaded to the texture with texSubImage2D. This is the
+   * only reliable way to sub-region a TexImageSource in WebGL 2 (spec §5.35).
    */
-  private uploadHalfFrame(
+  private drawHalfAndUpload(
     tex: WebGLTexture,
     video: HTMLVideoElement,
-    frameWidth: number,
-    skipPixels: number,
+    isLeft: boolean,
   ) {
     const gl = this.gl;
+    const ctx = this.splitCtx;
+    if (!ctx) return;
+
+    const drawX = isLeft ? 0 : -this.width;
+    ctx.clearRect(0, 0, this.width, this.height);
+    ctx.drawImage(video, drawX, 0);
+
     gl.bindTexture(gl.TEXTURE_2D, tex);
-
-    // Set unpack parameters to read one half of the hstack frame
-    gl.pixelStorei(gl.UNPACK_ROW_LENGTH, frameWidth * 2);
-    gl.pixelStorei(gl.UNPACK_SKIP_PIXELS, skipPixels);
-
-    gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, frameWidth, this.height, gl.RGBA, gl.UNSIGNED_BYTE, video);
-
-    // Always reset to defaults to avoid affecting subsequent uploads
-    gl.pixelStorei(gl.UNPACK_ROW_LENGTH, 0);
-    gl.pixelStorei(gl.UNPACK_SKIP_PIXELS, 0);
+    gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, gl.RGBA, gl.UNSIGNED_BYTE, this.splitCanvas!);
   }
 
   /**
@@ -278,6 +280,11 @@ export class TemporalFXEngine {
     const atlasW = width * ATLAS_COLS;
     const atlasH = height * ATLAS_ROWS;
 
+    // (Re)create the split canvas to match the new logical frame size.
+    // This canvas is frameWidth × frameHeight — exactly one half of the hstack.
+    this.splitCanvas = new OffscreenCanvas(width, height);
+    this.splitCtx = this.splitCanvas.getContext("2d", { willReadFrequently: false }) as OffscreenCanvasRenderingContext2D;
+
     // Pre-allocate all textures with explicit dimensions
     this.allocTexture(this.baseFrameTexture, width, height);
     this.allocTexture(this.maskFrameTexture, width, height);
@@ -315,11 +322,9 @@ export class TemporalFXEngine {
     if (!this.width || !this.height) return;
     if (hstackVideo.readyState < 2) return;
 
-    const frameWidth = this.width; // already set to videoWidth / 2 by resize()
-
-    // 1. Upload both halves of the hstack frame
-    this.uploadHalfFrame(this.baseFrameTexture, hstackVideo, frameWidth, 0);
-    this.uploadHalfFrame(this.maskFrameTexture, hstackVideo, frameWidth, frameWidth);
+    // 1. Upload both halves of the hstack frame via the split canvas
+    this.drawHalfAndUpload(this.baseFrameTexture, hstackVideo, true);
+    this.drawHalfAndUpload(this.maskFrameTexture, hstackVideo, false);
 
     // 2. Build slot-indexed weight array
     const depth = Math.min(state.historyDepth, this.historyFilled);
