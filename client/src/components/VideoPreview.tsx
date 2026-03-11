@@ -35,6 +35,7 @@ export default function VideoPreview({ videoUrl, state, onBufferWarmup, onDropVi
   // Use a ref for logical frame dimensions to avoid stale closures in the render loop.
   // For an hstack video, logicalWidth = videoWidth / 2, logicalHeight = videoHeight.
   const frameDimsRef = useRef({ w: 0, h: 0 });
+  const prevIsHstackRef = useRef<boolean | undefined>(undefined);
   const [videoSize, setVideoSize] = useState({ w: 0, h: 0 }); // for aspect ratio display only
 
   // Keep stateRef in sync without triggering re-renders
@@ -64,13 +65,15 @@ export default function VideoPreview({ videoUrl, state, onBufferWarmup, onDropVi
       return;
     }
 
-    // Logical frame size.
-    // For an hstack video videoWidth = 2 * frameWidth, so we halve it.
-    // For a plain video videoWidth = frameWidth, so we use it as-is.
-    // We detect hstack by checking whether the video is wider than it is tall
-    // by more than a 2:1 ratio — a reliable heuristic since the hstack command
-    // doubles the width while preserving height.
-    const isHstack = video.videoWidth > video.videoHeight * 1.8;
+    // Use isHstack from state to determine if video is side-by-side format
+    const isHstack = stateRef.current.isHstack ?? false;
+
+    // Reset frame dimensions when isHstack changes to force a resize
+    if (prevIsHstackRef.current !== undefined && prevIsHstackRef.current !== isHstack) {
+      frameDimsRef.current = { w: 0, h: 0 };
+    }
+    prevIsHstackRef.current = isHstack;
+
     const fw = Math.floor(isHstack ? video.videoWidth / 2 : video.videoWidth) || 320;
     const fh = video.videoHeight || 240;
 

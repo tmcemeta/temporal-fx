@@ -79,6 +79,12 @@ export class TemporalFXEngine {
   private width = 0;
   private height = 0;
 
+  // Actual atlas layout (computed based on max texture size)
+  private atlasCols = ATLAS_COLS;
+  private atlasRows = ATLAS_ROWS;
+  private maxHistoryFrames = MAX_HISTORY;
+  private maxTextureSize = 4096;
+
   constructor(canvas: HTMLCanvasElement) {
     this.canvas = canvas;
     const gl = canvas.getContext("webgl2", {
@@ -88,6 +94,11 @@ export class TemporalFXEngine {
     });
     if (!gl) throw new Error("WebGL2 not supported");
     this.gl = gl;
+
+    // Query max texture size
+    this.maxTextureSize = gl.getParameter(gl.MAX_TEXTURE_SIZE) as number;
+    console.log(`[TemporalFX] Max texture size: ${this.maxTextureSize}`);
+
     this.init();
   }
 
@@ -102,6 +113,7 @@ export class TemporalFXEngine {
       "u_blendMode", "u_blendStrength",
       "u_weightMode", "u_chromR", "u_chromB",
       "u_weightCurve", "u_weightCurveLen",
+      "u_atlasCols", "u_atlasRows",
       "u_excludeMask", "u_maskTex", "u_numMaskExcludeColors",
     ]);
     for (let i = 0; i < 5; i++) {
@@ -275,8 +287,12 @@ export class TemporalFXEngine {
    */
   private copyToAtlasTile(srcTex: WebGLTexture, atlasTex: WebGLTexture, slot: number) {
     const gl = this.gl;
-    const col = slot % ATLAS_COLS;
-    const row = Math.floor(slot / ATLAS_COLS);
+
+    // Use dynamic atlas layout
+    if (slot >= this.maxHistoryFrames) return;
+
+    const col = slot % this.atlasCols;
+    const row = Math.floor(slot / this.atlasCols);
     const xOffset = col * this.width;
     const yOffset = row * this.height;
 
@@ -302,8 +318,20 @@ export class TemporalFXEngine {
     this.canvas.width = width;
     this.canvas.height = height;
 
-    const atlasW = width * ATLAS_COLS;
-    const atlasH = height * ATLAS_ROWS;
+    // Compute atlas layout that fits within max texture size
+    // We want as many frames as possible while staying under the limit
+    const maxCols = Math.floor(this.maxTextureSize / width);
+    const maxRows = Math.floor(this.maxTextureSize / height);
+
+    // Limit to reasonable values (shader defines MAX_HISTORY=60)
+    this.atlasCols = Math.min(maxCols, ATLAS_COLS);
+    this.atlasRows = Math.min(maxRows, ATLAS_ROWS);
+    this.maxHistoryFrames = Math.min(this.atlasCols * this.atlasRows, MAX_HISTORY);
+
+    const atlasW = width * this.atlasCols;
+    const atlasH = height * this.atlasRows;
+
+    console.log(`[TemporalFX] Frame: ${width}x${height}, Atlas: ${atlasW}x${atlasH} (${this.atlasCols}x${this.atlasRows} = ${this.maxHistoryFrames} frames)`);
 
     // (Re)create the split canvas to match the new logical frame size.
     // This canvas is frameWidth × frameHeight — exactly one half of the hstack.
@@ -356,12 +384,14 @@ export class TemporalFXEngine {
     }
 
     // 2. Build slot-indexed weight array
-    const depth = Math.min(state.historyDepth, this.historyFilled);
+    // Limit depth to the actual number of frames we can store
+    const effectiveMaxHistory = this.maxHistoryFrames;
+    const depth = Math.min(state.historyDepth, this.historyFilled, effectiveMaxHistory);
     const weightLUT = buildWeightLUT(state.historyCurve, Math.max(depth, 1));
 
     const slotWeights = new Float32Array(MAX_HISTORY);
     for (let i = 0; i < depth; i++) {
-      const slot = ((this.historyHead - 1 - i) % MAX_HISTORY + MAX_HISTORY) % MAX_HISTORY;
+      const slot = ((this.historyHead - 1 - i) % effectiveMaxHistory + effectiveMaxHistory) % effectiveMaxHistory;
       const wx = depth <= 1 ? 0.5 : i / (depth - 1);
       const wIdx = Math.round(wx * (weightLUT.length - 1));
       slotWeights[slot] = weightLUT[wIdx];
@@ -371,10 +401,10 @@ export class TemporalFXEngine {
     const chromROffset = Math.min(Math.round(state.chromaticSpread), Math.max(depth - 1, 0));
     const chromBOffset = Math.min(Math.round(state.chromaticSpread * 1.5), Math.max(depth - 1, 0));
     const chromRSlot = depth > 0
-      ? ((this.historyHead - 1 - chromROffset) % MAX_HISTORY + MAX_HISTORY) % MAX_HISTORY
+      ? ((this.historyHead - 1 - chromROffset) % effectiveMaxHistory + effectiveMaxHistory) % effectiveMaxHistory
       : -1;
     const chromBSlot = depth > 0
-      ? ((this.historyHead - 1 - chromBOffset) % MAX_HISTORY + MAX_HISTORY) % MAX_HISTORY
+      ? ((this.historyHead - 1 - chromBOffset) % effectiveMaxHistory + effectiveMaxHistory) % effectiveMaxHistory
       : -1;
 
     const useProcessed = state.feedbackMix >= 0.5;
@@ -400,6 +430,10 @@ export class TemporalFXEngine {
 
     gl.uniform1fv(this.compositeProgram.uniforms["u_histWeights"], slotWeights);
     gl.uniform1i(this.compositeProgram.uniforms["u_numHistory"], MAX_HISTORY);
+
+    // Pass dynamic atlas layout to shader
+    gl.uniform1i(this.compositeProgram.uniforms["u_atlasCols"], this.atlasCols);
+    gl.uniform1i(this.compositeProgram.uniforms["u_atlasRows"], this.atlasRows);
 
     const blendModeIndex = ["screen", "add", "multiply", "overlay", "difference", "average"]
       .indexOf(state.blendMode);
@@ -479,8 +513,8 @@ export class TemporalFXEngine {
     }
     gl.bindFramebuffer(gl.READ_FRAMEBUFFER, null);
 
-    this.historyHead = (this.historyHead + 1) % MAX_HISTORY;
-    this.historyFilled = Math.min(this.historyFilled + 1, MAX_HISTORY);
+    this.historyHead = (this.historyHead + 1) % this.maxHistoryFrames;
+    this.historyFilled = Math.min(this.historyFilled + 1, this.maxHistoryFrames);
   }
 
   dispose() {

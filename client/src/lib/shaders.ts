@@ -24,7 +24,8 @@ void main() {
 `;
 
 export const MAX_HISTORY = 60;
-// Atlas is 6 columns × 10 rows = 60 frames max
+// Atlas layout will be computed dynamically based on WebGL max texture size
+// These are the maximum possible values; actual layout is computed in resize()
 export const ATLAS_COLS = 6;
 export const ATLAS_ROWS = 10; // ceil(MAX_HISTORY / ATLAS_COLS)
 
@@ -32,8 +33,6 @@ export const COMPOSITE_SHADER = `#version 300 es
 precision highp float;
 
 #define MAX_HISTORY ${MAX_HISTORY}
-#define ATLAS_COLS ${ATLAS_COLS}
-#define ATLAS_ROWS ${ATLAS_ROWS}
 
 in vec2 v_texCoord;
 out vec4 fragColor;
@@ -56,6 +55,10 @@ uniform int u_chromB;
 uniform float u_weightCurve[64];
 uniform int u_weightCurveLen;
 
+// Dynamic atlas layout
+uniform int u_atlasCols;
+uniform int u_atlasRows;
+
 // Mask exclusion
 uniform bool u_excludeMask;
 uniform sampler2D u_maskTex;
@@ -64,10 +67,10 @@ uniform int u_numMaskExcludeColors;
 
 // Sample a specific frame from the atlas by index (0 = most recent)
 vec4 sampleHistory(int frameIdx, vec2 uv) {
-  int col = frameIdx - (frameIdx / ATLAS_COLS) * ATLAS_COLS; // frameIdx % ATLAS_COLS
-  int row = frameIdx / ATLAS_COLS;
-  float u = (uv.x + float(col)) / float(ATLAS_COLS);
-  float v = (uv.y + float(row)) / float(ATLAS_ROWS);
+  int col = frameIdx - (frameIdx / u_atlasCols) * u_atlasCols; // frameIdx % u_atlasCols
+  int row = frameIdx / u_atlasCols;
+  float u = (uv.x + float(col)) / float(u_atlasCols);
+  float v = (uv.y + float(row)) / float(u_atlasRows);
   return texture(u_historyAtlas, vec2(u, v));
 }
 

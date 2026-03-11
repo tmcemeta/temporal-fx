@@ -196,19 +196,69 @@ export default function ControlPanel({
               whiteSpace: "nowrap",
             }}
           >
-            {hasVideo ? `✓ ${videoFileName}` : "Load Video  (hstack)"}
+            {hasVideo ? `✓ ${videoFileName}` : "Load Video"}
+          </button>
+
+          {/* Hstack toggle */}
+          <button
+            onClick={() => onChange({ isHstack: !state.isHstack })}
+            style={{
+              width: "100%",
+              background: state.isHstack
+                ? "rgba(78,205,196,0.12)"
+                : "rgba(255,255,255,0.03)",
+              border: `1px solid ${
+                state.isHstack
+                  ? "rgba(78,205,196,0.5)"
+                  : "rgba(255,255,255,0.1)"
+              }`,
+              color: state.isHstack
+                ? "#4ecdc4"
+                : "rgba(232,232,232,0.45)",
+              padding: "6px 10px",
+              fontFamily: "'DM Mono', monospace",
+              fontSize: "10px",
+              cursor: "pointer",
+              borderRadius: "2px",
+              textAlign: "left" as const,
+              letterSpacing: "0.08em",
+              transition: "all 0.15s",
+              display: "flex",
+              alignItems: "center",
+              gap: "7px",
+            }}
+          >
+            <span style={{
+              width: "10px",
+              height: "10px",
+              borderRadius: "2px",
+              border: `1px solid ${
+                state.isHstack
+                  ? "#4ecdc4"
+                  : "rgba(255,255,255,0.2)"
+              }`,
+              background: state.isHstack
+                ? "#4ecdc4"
+                : "transparent",
+              display: "inline-block",
+              flexShrink: 0,
+              transition: "all 0.15s",
+            }} />
+            Side-by-Side Input (base | mask)
           </button>
 
           {/* Hint line */}
-          <div style={{
-            fontFamily: "'DM Mono', monospace",
-            fontSize: "9px",
-            color: "rgba(78,205,196,0.3)",
-            letterSpacing: "0.06em",
-            paddingLeft: "2px",
-          }}>
-            base | mask — side by side
-          </div>
+          {state.isHstack && (
+            <div style={{
+              fontFamily: "'DM Mono', monospace",
+              fontSize: "9px",
+              color: "rgba(78,205,196,0.3)",
+              letterSpacing: "0.06em",
+              paddingLeft: "2px",
+            }}>
+              left half = base, right half = mask
+            </div>
+          )}
 
           {/* Mask color controls — always shown; they key against the mask half */}
           <div style={{ marginTop: "6px" }}>
