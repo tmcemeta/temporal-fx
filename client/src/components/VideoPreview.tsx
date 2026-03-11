@@ -64,8 +64,14 @@ export default function VideoPreview({ videoUrl, state, onBufferWarmup, onDropVi
       return;
     }
 
-    // Logical frame size: each half of the hstack video
-    const fw = Math.floor(video.videoWidth / 2) || 320;
+    // Logical frame size.
+    // For an hstack video videoWidth = 2 * frameWidth, so we halve it.
+    // For a plain video videoWidth = frameWidth, so we use it as-is.
+    // We detect hstack by checking whether the video is wider than it is tall
+    // by more than a 2:1 ratio — a reliable heuristic since the hstack command
+    // doubles the width while preserving height.
+    const isHstack = video.videoWidth > video.videoHeight * 1.8;
+    const fw = Math.floor(isHstack ? video.videoWidth / 2 : video.videoWidth) || 320;
     const fh = video.videoHeight || 240;
 
     // Resize (and clear history) only when logical dimensions change
@@ -75,7 +81,7 @@ export default function VideoPreview({ videoUrl, state, onBufferWarmup, onDropVi
       engine.resize(fw, fh);
     }
 
-    engine.renderFrame(video, stateRef.current);
+    engine.renderFrame(video, stateRef.current, isHstack);
 
     // Update buffer warmup indicator
     const depth = stateRef.current.historyDepth;
@@ -236,6 +242,9 @@ export default function VideoPreview({ videoUrl, state, onBufferWarmup, onDropVi
           style={{
             maxWidth: "100%",
             maxHeight: "100%",
+            // CSS aspect-ratio keeps the canvas display size correct regardless
+            // of the backing pixel dimensions set by the engine.
+            aspectRatio: `${aspectRatio}`,
             display: videoUrl ? "block" : "none",
             imageRendering: "pixelated",
           }}

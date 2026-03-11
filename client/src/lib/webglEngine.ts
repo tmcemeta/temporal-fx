@@ -254,6 +254,22 @@ export class TemporalFXEngine {
   }
 
   /**
+   * Upload the full video frame (no cropping) into a pre-allocated texture.
+   * Used for plain (non-hstack) videos where base and mask are the same frame.
+   */
+  private drawFullFrame(tex: WebGLTexture, video: HTMLVideoElement) {
+    const gl = this.gl;
+    const ctx = this.splitCtx;
+    if (!ctx) return;
+
+    ctx.clearRect(0, 0, this.width, this.height);
+    ctx.drawImage(video, 0, 0, this.width, this.height);
+
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, gl.RGBA, gl.UNSIGNED_BYTE, this.splitCanvas!);
+  }
+
+  /**
    * Copy a texture into a specific tile of the atlas using copyTexSubImage2D.
    * The source texture must be pre-allocated and attached to copyFBO.
    */
@@ -316,24 +332,28 @@ export class TemporalFXEngine {
   }
 
   /**
-   * Render one frame from an hstack-encoded video element.
+   * Render one frame.
    *
-   * @param hstackVideo  The <video> element; videoWidth = frameWidth * 2
-   * @param state        Current FX parameters
-   *
-   * The engine derives frameWidth = videoWidth / 2 and uses UNPACK_ROW_LENGTH
-   * to upload the left half as the base frame and the right half as the mask frame.
-   * The mask is always present when an hstack video is loaded — the overlay shader
-   * receives u_hasMask = true unconditionally.
+   * @param video    The <video> element
+   * @param state    Current FX parameters
+   * @param isHstack true  → video is hstack-encoded (left=base, right=mask)
+   *                 false → plain video; base = full frame, mask = same frame
    */
-  renderFrame(hstackVideo: HTMLVideoElement, state: FXState) {
+  renderFrame(video: HTMLVideoElement, state: FXState, isHstack: boolean) {
     const gl = this.gl;
     if (!this.width || !this.height) return;
-    if (hstackVideo.readyState < 2) return;
+    if (video.readyState < 2) return;
 
-    // 1. Upload both halves of the hstack frame via the split canvas
-    this.drawHalfAndUpload(this.baseFrameTexture, hstackVideo, true);
-    this.drawHalfAndUpload(this.maskFrameTexture, hstackVideo, false);
+    // 1. Upload base and mask frames
+    if (isHstack) {
+      // Crop left half → base, right half → mask
+      this.drawHalfAndUpload(this.baseFrameTexture, video, true);
+      this.drawHalfAndUpload(this.maskFrameTexture, video, false);
+    } else {
+      // Plain video: upload the full frame as base, reuse it as mask
+      this.drawFullFrame(this.baseFrameTexture, video);
+      this.drawFullFrame(this.maskFrameTexture, video);
+    }
 
     // 2. Build slot-indexed weight array
     const depth = Math.min(state.historyDepth, this.historyFilled);
