@@ -57,6 +57,9 @@ export class SubjectEngine {
   private width = 0;
   private height = 0;
 
+  // Whether RGBA32F render targets are supported (requires EXT_color_buffer_float)
+  private floatFboSupported = false;
+
   constructor(canvas: HTMLCanvasElement) {
     this.canvas = canvas;
     const gl = canvas.getContext("webgl2", {
@@ -66,6 +69,9 @@ export class SubjectEngine {
     });
     if (!gl) throw new Error("WebGL2 not supported");
     this.gl = gl;
+    // EXT_color_buffer_float is required for RGBA32F render targets and
+    // gl.readPixels with gl.FLOAT. Without it the FBO is incomplete.
+    this.floatFboSupported = !!gl.getExtension("EXT_color_buffer_float");
     this.init();
   }
 
@@ -98,14 +104,26 @@ export class SubjectEngine {
     this.baseFrameTexture = this.makeTexture(gl.LINEAR);
     this.maskFrameTexture = this.makeTexture(gl.LINEAR);
 
-    // 1×1 RGBA32F texture + FBO for bbox readback
+    // 1×1 render target + FBO for bbox readback.
+    // Prefer RGBA32F (float) for precision; fall back to RGBA8 (unorm) if
+    // EXT_color_buffer_float is unavailable. The bbox values are in [0..1]
+    // so RGBA8 (255 levels) is sufficient for sub-pixel accuracy at typical
+    // resolutions.
     this.bboxTexture = this.makeTexture(gl.NEAREST);
     gl.bindTexture(gl.TEXTURE_2D, this.bboxTexture);
-    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, 1, 1, 0, gl.RGBA, gl.FLOAT, null);
+    if (this.floatFboSupported) {
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA32F, 1, 1, 0, gl.RGBA, gl.FLOAT, null);
+    } else {
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+    }
 
     this.bboxFBO = gl.createFramebuffer()!;
     gl.bindFramebuffer(gl.FRAMEBUFFER, this.bboxFBO);
     gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, this.bboxTexture, 0);
+    const fboStatus = gl.checkFramebufferStatus(gl.FRAMEBUFFER);
+    if (fboStatus !== gl.FRAMEBUFFER_COMPLETE) {
+      console.warn("BBox FBO incomplete:", fboStatus);
+    }
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
   }
 
@@ -314,13 +332,21 @@ export class SubjectEngine {
 
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
 
-    // Read back the single RGBA32F pixel
-    const pixel = new Float32Array(4);
-    gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.FLOAT, pixel);
+    // Read back the single pixel.
+    // Use FLOAT if the extension is available, otherwise UNSIGNED_BYTE (values
+    // are packed into 0..255 and must be normalized back to 0..1).
+    let x1: number, y1: number, x2: number, y2: number;
+    if (this.floatFboSupported) {
+      const pixel = new Float32Array(4);
+      gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.FLOAT, pixel);
+      x1 = pixel[0]; y1 = pixel[1]; x2 = pixel[2]; y2 = pixel[3];
+    } else {
+      const pixel = new Uint8Array(4);
+      gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, pixel);
+      x1 = pixel[0] / 255; y1 = pixel[1] / 255; x2 = pixel[2] / 255; y2 = pixel[3] / 255;
+    }
 
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
-
-    const x1 = pixel[0], y1 = pixel[1], x2 = pixel[2], y2 = pixel[3];
 
     // If no pixels matched, x1 > x2 or y1 > y2
     if (x1 > x2 || y1 > y2) return null;

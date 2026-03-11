@@ -6,9 +6,11 @@
 // Video format: hstack-encoded (base = left half, mask = right half).
 // A single <video> element decodes both halves in lockstep — no drift is possible.
 //
-// Bbox overlay: a transparent 2D canvas is stacked on top of the WebGL canvas.
-// After each frame, the engine returns per-color BBox results which are drawn
-// as labeled rectangles using each mask color.
+// Bbox overlay: a transparent 2D canvas is stacked on top of the WebGL canvas
+// using a shared wrapper div (position: relative). The overlay canvas uses
+// position: absolute; inset: 0 to always match the WebGL canvas exactly.
+// Canvas buffer dimensions are synced from the wrapper's clientWidth/clientHeight
+// every frame so they are always valid.
 
 import React, { useRef, useEffect, useCallback, useState } from "react";
 import type { SubjectState, BBox, RGBColor } from "@/lib/types";
@@ -33,6 +35,8 @@ function labelColor(c: RGBColor): string {
 export default function VideoPreview({ videoUrl, state, onDropVideo }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const overlayRef = useRef<HTMLCanvasElement>(null);
+  // Shared wrapper that both canvases live inside — used to measure display size
+  const canvasWrapperRef = useRef<HTMLDivElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
   const engineRef = useRef<SubjectEngine | null>(null);
   const rafRef = useRef<number>(0);
@@ -71,32 +75,36 @@ export default function VideoPreview({ videoUrl, state, onDropVideo }: Props) {
   const drawBboxOverlay = useCallback((
     bboxes: Array<BBox | null>,
     colors: RGBColor[],
-    canvasW: number,
-    canvasH: number,
+    displayW: number,
+    displayH: number,
   ) => {
     const overlay = overlayRef.current;
-    if (!overlay) return;
+    if (!overlay || displayW === 0 || displayH === 0) return;
     const ctx = overlay.getContext("2d");
     if (!ctx) return;
 
-    // Match overlay dimensions to the WebGL canvas display size
-    if (overlay.width !== canvasW || overlay.height !== canvasH) {
-      overlay.width = canvasW;
-      overlay.height = canvasH;
+    // Sync canvas buffer size to display size (avoids blurry/scaled drawing)
+    if (overlay.width !== displayW || overlay.height !== displayH) {
+      overlay.width = displayW;
+      overlay.height = displayH;
     }
 
-    ctx.clearRect(0, 0, canvasW, canvasH);
+    ctx.clearRect(0, 0, displayW, displayH);
 
     bboxes.forEach((bbox, i) => {
       if (!bbox) return;
       const color = colors[i];
 
-      const x = bbox.x1 * canvasW;
-      const y = (1 - bbox.y2) * canvasH; // flip Y: WebGL UV origin is bottom-left
-      const w = (bbox.x2 - bbox.x1) * canvasW;
-      const h = (bbox.y2 - bbox.y1) * canvasH;
+      // WebGL UV origin is bottom-left; canvas 2D origin is top-left.
+      // Flip Y: canvas_y = (1 - uv_y) * height
+      const x = bbox.x1 * displayW;
+      const y = (1 - bbox.y2) * displayH;
+      const w = (bbox.x2 - bbox.x1) * displayW;
+      const h = (bbox.y2 - bbox.y1) * displayH;
 
-      // Outer glow / shadow for visibility on any background
+      if (w < 1 || h < 1) return;
+
+      // Drop shadow for visibility on any background
       ctx.shadowColor = "rgba(0,0,0,0.7)";
       ctx.shadowBlur = 4;
 
@@ -107,14 +115,14 @@ export default function VideoPreview({ videoUrl, state, onDropVideo }: Props) {
 
       ctx.shadowBlur = 0;
 
-      // Corner accents (L-shaped ticks at each corner)
-      const tick = Math.min(w, h) * 0.12;
+      // Corner accent ticks (L-shaped)
+      const tick = Math.min(w, h, 20) * 0.3;
       ctx.strokeStyle = rgbToCss(color, 1);
       ctx.lineWidth = 2;
       const corners: [number, number, number, number][] = [
-        [x, y, tick, tick],
-        [x + w, y, -tick, tick],
-        [x, y + h, tick, -tick],
+        [x,     y,     tick,  tick],
+        [x + w, y,     -tick, tick],
+        [x,     y + h, tick,  -tick],
         [x + w, y + h, -tick, -tick],
       ];
       corners.forEach(([cx, cy, dx, dy]) => {
@@ -176,14 +184,18 @@ export default function VideoPreview({ videoUrl, state, onDropVideo }: Props) {
     const bboxes = engine.renderFrame(video, s);
     setCurrentTime(video.currentTime);
 
-    // Draw bbox overlay if enabled
-    const glCanvas = canvasRef.current;
-    if (s.showBbox && bboxes.length > 0 && glCanvas) {
+    // Measure display size from the wrapper div — always valid, even before
+    // the canvas has an explicit pixel size set via CSS.
+    const wrapper = canvasWrapperRef.current;
+    const displayW = wrapper ? wrapper.clientWidth : 0;
+    const displayH = wrapper ? wrapper.clientHeight : 0;
+
+    if (s.showBbox && bboxes.length > 0) {
       drawBboxOverlay(
         bboxes,
         s.maskColors.slice(0, s.maskCount),
-        glCanvas.clientWidth,
-        glCanvas.clientHeight,
+        displayW,
+        displayH,
       );
     } else {
       // Clear overlay when bbox is off
@@ -322,31 +334,49 @@ export default function VideoPreview({ videoUrl, state, onDropVideo }: Props) {
           </div>
         )}
 
-        {/* WebGL canvas */}
-        <canvas
-          ref={canvasRef}
+        {/*
+          Shared wrapper for WebGL canvas + overlay canvas.
+          - position: relative so the overlay can use position: absolute; inset: 0
+          - maxWidth/maxHeight + aspectRatio constrain the wrapper to the video frame
+          - Both canvases fill the wrapper 100% so they are always the same size
+          - clientWidth/clientHeight of this wrapper is used to size the overlay buffer
+        */}
+        <div
+          ref={canvasWrapperRef}
           style={{
-            maxWidth: "100%",
-            maxHeight: "100%",
-            aspectRatio: `${aspectRatio}`,
-            display: videoUrl ? "block" : "none",
-            imageRendering: "pixelated",
             position: "relative",
-          }}
-        />
-
-        {/* 2D overlay canvas for bbox drawing — sits exactly on top of the WebGL canvas */}
-        <canvas
-          ref={overlayRef}
-          style={{
-            position: "absolute",
             maxWidth: "100%",
             maxHeight: "100%",
             aspectRatio: `${aspectRatio}`,
             display: videoUrl ? "block" : "none",
-            pointerEvents: "none",
+            // Flex children need explicit width/height to fill the wrapper
+            width: "100%",
+            height: "100%",
           }}
-        />
+        >
+          {/* WebGL canvas — fills the wrapper */}
+          <canvas
+            ref={canvasRef}
+            style={{
+              display: "block",
+              width: "100%",
+              height: "100%",
+              imageRendering: "pixelated",
+            }}
+          />
+
+          {/* 2D overlay canvas — stacked exactly on top via absolute inset */}
+          <canvas
+            ref={overlayRef}
+            style={{
+              position: "absolute",
+              inset: 0,
+              width: "100%",
+              height: "100%",
+              pointerEvents: "none",
+            }}
+          />
+        </div>
       </div>
 
       {/* Playback controls */}
