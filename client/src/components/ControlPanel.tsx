@@ -151,6 +151,20 @@ const handleLoad = (e: React.ChangeEvent<HTMLInputElement>) => {
             halation: DEFAULT_STATE.postFX.halation,
           };
         }
+        // Migration guard: fill in softGlow defaults if missing (old JSON format)
+        if (!loaded.postFX.softGlow) {
+          loaded.postFX = {
+            ...loaded.postFX,
+            softGlow: DEFAULT_STATE.postFX.softGlow,
+          };
+        }
+        // Migration guard: fill in orton defaults if missing (old JSON format)
+        if (!loaded.postFX.orton) {
+          loaded.postFX = {
+            ...loaded.postFX,
+            orton: DEFAULT_STATE.postFX.orton,
+          };
+        }
         // Migration guard: ensure bezier curves have all 4 control points (for old JSON files)
         if (loaded.historyCurve && loaded.historyCurve.p0x === undefined) {
           loaded.historyCurve = {
@@ -730,7 +744,7 @@ const handleLoad = (e: React.ChangeEvent<HTMLInputElement>) => {
               label="Intensity"
               value={state.postFX.halation.intensity}
               min={0}
-              max={2}
+              max={10}
               step={0.01}
               onChange={v => onChange({
                 postFX: {
@@ -791,6 +805,217 @@ const handleLoad = (e: React.ChangeEvent<HTMLInputElement>) => {
                   {rgbToHex(state.postFX.halation.tint).toUpperCase()}
                 </span>
               </div>
+            </div>
+          </>
+        )}
+
+        {/* Soft Glow toggle */}
+        <button
+          onClick={() => onChange({
+            postFX: {
+              ...state.postFX,
+              softGlow: { ...state.postFX.softGlow, enabled: !state.postFX.softGlow.enabled }
+            }
+          })}
+          style={{
+            width: "100%",
+            background: state.postFX.softGlow.enabled
+              ? "rgba(78,205,196,0.12)"
+              : "rgba(255,255,255,0.03)",
+            border: `1px solid ${
+              state.postFX.softGlow.enabled
+                ? "rgba(78,205,196,0.5)"
+                : "rgba(255,255,255,0.1)"
+            }`,
+            color: state.postFX.softGlow.enabled
+              ? "#4ecdc4"
+              : "rgba(232,232,232,0.45)",
+            padding: "6px 10px",
+            fontFamily: "'DM Mono', monospace",
+            fontSize: "10px",
+            cursor: "pointer",
+            borderRadius: "2px",
+            textAlign: "left" as const,
+            letterSpacing: "0.08em",
+            transition: "all 0.15s",
+            display: "flex",
+            alignItems: "center",
+            gap: "7px",
+            marginTop: "8px",
+            marginBottom: state.postFX.softGlow.enabled ? "10px" : "0",
+          }}
+        >
+          <span style={{
+            width: "10px",
+            height: "10px",
+            borderRadius: "2px",
+            border: `1px solid ${
+              state.postFX.softGlow.enabled
+                ? "#4ecdc4"
+                : "rgba(255,255,255,0.2)"
+            }`,
+            background: state.postFX.softGlow.enabled
+              ? "#4ecdc4"
+              : "transparent",
+            display: "inline-block",
+            flexShrink: 0,
+            transition: "all 0.15s",
+          }} />
+          Soft Glow
+        </button>
+
+        {/* Soft Glow sliders (conditional) */}
+        {state.postFX.softGlow.enabled && (
+          <>
+            <SliderRow
+              label="Blur Radius"
+              value={state.postFX.softGlow.blurRadius}
+              min={4}
+              max={40}
+              step={0.5}
+              onChange={v => onChange({
+                postFX: {
+                  ...state.postFX,
+                  softGlow: { ...state.postFX.softGlow, blurRadius: v }
+                }
+              })}
+              display={`${state.postFX.softGlow.blurRadius}px`}
+            />
+
+            <SliderRow
+              label="Exposure"
+              value={state.postFX.softGlow.exposure}
+              min={0.5}
+              max={2.0}
+              step={0.01}
+              onChange={v => onChange({
+                postFX: {
+                  ...state.postFX,
+                  softGlow: { ...state.postFX.softGlow, exposure: v }
+                }
+              })}
+              display={state.postFX.softGlow.exposure.toFixed(2)}
+            />
+
+            <SliderRow
+              label="Intensity"
+              value={state.postFX.softGlow.intensity}
+              min={0}
+              max={2}
+              step={0.01}
+              onChange={v => onChange({
+                postFX: {
+                  ...state.postFX,
+                  softGlow: { ...state.postFX.softGlow, intensity: v }
+                }
+              })}
+              display={state.postFX.softGlow.intensity.toFixed(2)}
+            />
+          </>
+        )}
+
+        {/* Orton Effect toggle */}
+        <button
+          onClick={() => onChange({
+            postFX: {
+              ...state.postFX,
+              orton: { ...state.postFX.orton, enabled: !state.postFX.orton.enabled }
+            }
+          })}
+          style={{
+            width: "100%",
+            background: state.postFX.orton.enabled
+              ? "rgba(78,205,196,0.12)"
+              : "rgba(255,255,255,0.03)",
+            border: `1px solid ${
+              state.postFX.orton.enabled
+                ? "rgba(78,205,196,0.5)"
+                : "rgba(255,255,255,0.1)"
+            }`,
+            color: state.postFX.orton.enabled
+              ? "#4ecdc4"
+              : "rgba(232,232,232,0.45)",
+            padding: "6px 10px",
+            fontFamily: "'DM Mono', monospace",
+            fontSize: "10px",
+            cursor: "pointer",
+            borderRadius: "2px",
+            textAlign: "left" as const,
+            letterSpacing: "0.08em",
+            transition: "all 0.15s",
+            display: "flex",
+            alignItems: "center",
+            gap: "7px",
+            marginTop: "8px",
+            marginBottom: state.postFX.orton.enabled ? "10px" : "0",
+          }}
+        >
+          <span style={{
+            width: "10px",
+            height: "10px",
+            borderRadius: "2px",
+            border: `1px solid ${
+              state.postFX.orton.enabled
+                ? "#4ecdc4"
+                : "rgba(255,255,255,0.2)"
+            }`,
+            background: state.postFX.orton.enabled
+              ? "#4ecdc4"
+              : "transparent",
+            display: "inline-block",
+            flexShrink: 0,
+            transition: "all 0.15s",
+          }} />
+          Orton Effect
+        </button>
+
+        {/* Orton Effect controls (conditional) */}
+        {state.postFX.orton.enabled && (
+          <>
+            <SliderRow
+              label="Blend Opacity"
+              value={state.postFX.orton.blendOpacity}
+              min={0}
+              max={1}
+              step={0.01}
+              onChange={v => onChange({
+                postFX: {
+                  ...state.postFX,
+                  orton: { ...state.postFX.orton, blendOpacity: v }
+                }
+              })}
+              display={state.postFX.orton.blendOpacity.toFixed(2)}
+            />
+
+            {/* Blend Mode dropdown */}
+            <div style={ROW_STYLE}>
+              <span style={PARAM_LABEL}>Blend Mode</span>
+              <select
+                value={state.postFX.orton.blendMode}
+                onChange={e => onChange({
+                  postFX: {
+                    ...state.postFX,
+                    orton: { ...state.postFX.orton, blendMode: e.target.value as 'screen' | 'softLight' | 'average' }
+                  }
+                })}
+                style={{ flex: 1 }}
+              >
+                <option value="screen">Screen</option>
+                <option value="softLight">Soft Light</option>
+                <option value="average">Average</option>
+              </select>
+            </div>
+
+            {/* Helper text */}
+            <div style={{
+              fontFamily: "'DM Mono', monospace",
+              fontSize: "9px",
+              color: "rgba(78,205,196,0.3)",
+              letterSpacing: "0.06em",
+              paddingLeft: "2px",
+              marginTop: "4px",
+            }}>
+              Blends FX output with sharp original
             </div>
           </>
         )}

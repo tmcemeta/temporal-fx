@@ -84,10 +84,27 @@ export interface HalationState {
   tint: RGBColor;     // warm tint color (default: orange {r: 1.0, g: 0.4, b: 0.2})
 }
 
+// Soft Glow effect parameters (dreamy full-image blur + exposure boost)
+export interface SoftGlowState {
+  enabled: boolean;
+  blurRadius: number;   // 4-40px: blur amount
+  exposure: number;     // 0.5-2.0: brightness boost
+  intensity: number;    // 0-2: blend strength
+}
+
+// Orton Effect parameters (final sandwich pass: blend FX result with sharp original)
+export interface OrtonState {
+  enabled: boolean;
+  blendOpacity: number;     // 0-1: how much of the sharp original to blend in
+  blendMode: 'screen' | 'softLight' | 'average';  // blend mode for combining
+}
+
 // Extensible post-processing state (add future effects here)
 export interface PostFXState {
   bloom: BloomState;
   halation: HalationState;
+  softGlow: SoftGlowState;
+  orton: OrtonState;
 }
 
 export const DEFAULT_STATE: FXState = {
@@ -123,6 +140,17 @@ export const DEFAULT_STATE: FXState = {
       intensity: 0.8,
       radius: 16,
       tint: { r: 1.0, g: 0.4, b: 0.2 },
+    },
+    softGlow: {
+      enabled: false,
+      blurRadius: 16,
+      exposure: 1.2,
+      intensity: 0.6,
+    },
+    orton: {
+      enabled: false,
+      blendOpacity: 0.5,
+      blendMode: 'screen',
     },
   },
 };

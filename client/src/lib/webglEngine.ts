@@ -34,6 +34,9 @@ import {
   BLOOM_COMPOSITE_SHADER,
   HALATION_BRIGHT_PASS_SHADER,
   HALATION_COMPOSITE_SHADER,
+  SOFT_GLOW_EXPOSURE_SHADER,
+  SOFT_GLOW_COMPOSITE_SHADER,
+  ORTON_SANDWICH_SHADER,
   MAX_HISTORY,
   ATLAS_COLS,
   ATLAS_ROWS,
@@ -86,6 +89,9 @@ export class TemporalFXEngine {
   private bloomCompositeProgram!: Program;
   private halationBrightPassProgram!: Program;
   private halationCompositeProgram!: Program;
+  private softGlowExposureProgram!: Program;
+  private softGlowCompositeProgram!: Program;
+  private ortonSandwichProgram!: Program;
   private halfWidth = 0;
   private halfHeight = 0;
 
@@ -168,6 +174,18 @@ for (let i = 0; i < 5; i++) {
 
     this.halationCompositeProgram = this.createProgram(VERTEX_SHADER, HALATION_COMPOSITE_SHADER, [
       "u_original", "u_halation", "u_intensity",
+    ]);
+
+    this.softGlowExposureProgram = this.createProgram(VERTEX_SHADER, SOFT_GLOW_EXPOSURE_SHADER, [
+      "u_source", "u_exposure",
+    ]);
+
+    this.softGlowCompositeProgram = this.createProgram(VERTEX_SHADER, SOFT_GLOW_COMPOSITE_SHADER, [
+      "u_original", "u_softGlow", "u_intensity",
+    ]);
+
+    this.ortonSandwichProgram = this.createProgram(VERTEX_SHADER, ORTON_SANDWICH_SHADER, [
+      "u_fxResult", "u_baseFrame", "u_blendOpacity", "u_blendMode",
     ]);
 
     this.quadBuffer = this.createQuadBuffer();
@@ -587,15 +605,19 @@ console.log(`[TemporalFX] Frame: ${width}x${height}, Atlas: ${atlasW}x${atlasH} 
    * 1. Copy compositeTexture → postFxA
    * 2. If bloom.enabled: bright-pass → blur → bloom composite → swap (postFxA ↔ postFxB)
    * 3. If halation.enabled: halation bright-pass → blur → halation composite → swap
-   * 4. Return postFxA (or compositeTexture if nothing enabled)
+   * 4. If softGlow.enabled: exposure pass → blur → soft glow composite → swap
+   * 5. If orton.enabled: sandwich blend currentTex with baseFrameTexture → swap (FINAL PASS)
+   * 6. Return currentTex (or compositeTexture if nothing enabled)
    */
   private runPostFX(postFX: PostFXState): WebGLTexture {
     const gl = this.gl;
     const bloom = postFX.bloom;
     const halation = postFX.halation;
+    const softGlow = postFX.softGlow;
+    const orton = postFX.orton;
 
     // If no effects enabled, return compositeTexture directly
-    if (!bloom.enabled && !halation.enabled) {
+    if (!bloom.enabled && !halation.enabled && !softGlow.enabled && !orton.enabled) {
       return this.compositeTexture;
     }
 
@@ -748,6 +770,102 @@ console.log(`[TemporalFX] Frame: ${width}x${height}, Atlas: ${atlasW}x${atlasH} 
       targetTex = temp;
     }
 
+    // ─── SOFT GLOW PASS ──────────────────────────────────────────────────────
+    if (softGlow.enabled) {
+      // a. Exposure pass: currentTex → blurPongHalf (half-res with exposure boost)
+      gl.bindFramebuffer(gl.FRAMEBUFFER, this.postFxFBO);
+      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, this.blurPongHalf, 0);
+      gl.viewport(0, 0, this.halfWidth, this.halfHeight);
+      gl.useProgram(this.softGlowExposureProgram.program);
+      this.bindQuad(this.softGlowExposureProgram);
+
+      gl.activeTexture(gl.TEXTURE0);
+      gl.bindTexture(gl.TEXTURE_2D, currentTex);
+      gl.uniform1i(this.softGlowExposureProgram.uniforms["u_source"], 0);
+      gl.uniform1f(this.softGlowExposureProgram.uniforms["u_exposure"], softGlow.exposure);
+
+      gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+
+      // b. H-blur: blurPongHalf → blurPingHalf
+      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, this.blurPingHalf, 0);
+      gl.useProgram(this.blurProgram.program);
+      this.bindQuad(this.blurProgram);
+
+      gl.activeTexture(gl.TEXTURE0);
+      gl.bindTexture(gl.TEXTURE_2D, this.blurPongHalf);
+      gl.uniform1i(this.blurProgram.uniforms["u_source"], 0);
+      gl.uniform2f(this.blurProgram.uniforms["u_direction"], 1.0, 0.0);
+      gl.uniform1f(this.blurProgram.uniforms["u_radius"], softGlow.blurRadius);
+      gl.uniform2f(this.blurProgram.uniforms["u_texelSize"], 1.0 / this.halfWidth, 1.0 / this.halfHeight);
+
+      gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+
+      // c. V-blur: blurPingHalf → blurPongHalf
+      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, this.blurPongHalf, 0);
+
+      gl.activeTexture(gl.TEXTURE0);
+      gl.bindTexture(gl.TEXTURE_2D, this.blurPingHalf);
+      gl.uniform1i(this.blurProgram.uniforms["u_source"], 0);
+      gl.uniform2f(this.blurProgram.uniforms["u_direction"], 0.0, 1.0);
+
+      gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+
+      // d. Soft Glow composite (screen blend): currentTex + blurPongHalf → targetTex
+      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, targetTex, 0);
+      gl.viewport(0, 0, this.width, this.height);
+      gl.useProgram(this.softGlowCompositeProgram.program);
+      this.bindQuad(this.softGlowCompositeProgram);
+
+      gl.activeTexture(gl.TEXTURE0);
+      gl.bindTexture(gl.TEXTURE_2D, currentTex);
+      gl.uniform1i(this.softGlowCompositeProgram.uniforms["u_original"], 0);
+
+      gl.activeTexture(gl.TEXTURE1);
+      gl.bindTexture(gl.TEXTURE_2D, this.blurPongHalf);
+      gl.uniform1i(this.softGlowCompositeProgram.uniforms["u_softGlow"], 1);
+
+      gl.uniform1f(this.softGlowCompositeProgram.uniforms["u_intensity"], softGlow.intensity);
+
+      gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+
+      // Swap textures so currentTex has soft glow result
+      const temp = currentTex;
+      currentTex = targetTex;
+      targetTex = temp;
+    }
+
+    // ─── ORTON SANDWICH PASS (FINAL) ─────────────────────────────────────────
+    if (orton.enabled) {
+      // Blend currentTex (all FX results) with baseFrameTexture (sharp original)
+      gl.bindFramebuffer(gl.FRAMEBUFFER, this.postFxFBO);
+      gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, targetTex, 0);
+      gl.viewport(0, 0, this.width, this.height);
+      gl.useProgram(this.ortonSandwichProgram.program);
+      this.bindQuad(this.ortonSandwichProgram);
+
+      gl.activeTexture(gl.TEXTURE0);
+      gl.bindTexture(gl.TEXTURE_2D, currentTex);
+      gl.uniform1i(this.ortonSandwichProgram.uniforms["u_fxResult"], 0);
+
+      gl.activeTexture(gl.TEXTURE1);
+      gl.bindTexture(gl.TEXTURE_2D, this.baseFrameTexture);
+      gl.uniform1i(this.ortonSandwichProgram.uniforms["u_baseFrame"], 1);
+
+      gl.uniform1f(this.ortonSandwichProgram.uniforms["u_blendOpacity"], orton.blendOpacity);
+
+      // Blend mode: 0=screen, 1=softLight, 2=average
+      const blendModeIndex = orton.blendMode === 'screen' ? 0 :
+                             orton.blendMode === 'softLight' ? 1 : 2;
+      gl.uniform1i(this.ortonSandwichProgram.uniforms["u_blendMode"], blendModeIndex);
+
+      gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+
+      // Swap textures so currentTex has orton result
+      const temp = currentTex;
+      currentTex = targetTex;
+      targetTex = temp;
+    }
+
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
 
     return currentTex;
@@ -762,6 +880,9 @@ dispose() {
     gl.deleteProgram(this.bloomCompositeProgram.program);
     gl.deleteProgram(this.halationBrightPassProgram.program);
     gl.deleteProgram(this.halationCompositeProgram.program);
+    gl.deleteProgram(this.softGlowExposureProgram.program);
+    gl.deleteProgram(this.softGlowCompositeProgram.program);
+    gl.deleteProgram(this.ortonSandwichProgram.program);
     gl.deleteTexture(this.atlasOriginal);
     gl.deleteTexture(this.atlasProcessed);
     gl.deleteTexture(this.baseFrameTexture);

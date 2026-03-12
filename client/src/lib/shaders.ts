@@ -429,3 +429,111 @@ void main() {
   fragColor = vec4(result, original.a);
 }
 `;
+
+// ─── Soft Glow Shaders ───────────────────────────────────────────────────────
+
+// Soft Glow exposure pass: boost brightness of full image (no threshold)
+export const SOFT_GLOW_EXPOSURE_SHADER = `#version 300 es
+precision highp float;
+
+in vec2 v_texCoord;
+out vec4 fragColor;
+
+uniform sampler2D u_source;
+uniform float u_exposure;
+
+void main() {
+  vec4 color = texture(u_source, v_texCoord);
+
+  // Apply exposure boost to all pixels (no luminance threshold)
+  vec3 result = color.rgb * u_exposure;
+
+  fragColor = vec4(result, color.a);
+}
+`;
+
+// Soft Glow composite: screen blend of blurred+exposed glow onto original
+export const SOFT_GLOW_COMPOSITE_SHADER = `#version 300 es
+precision highp float;
+
+in vec2 v_texCoord;
+out vec4 fragColor;
+
+uniform sampler2D u_original;
+uniform sampler2D u_softGlow;
+uniform float u_intensity;
+
+void main() {
+  vec4 original = texture(u_original, v_texCoord);
+  vec4 glow = texture(u_softGlow, v_texCoord);
+
+  // Screen blend for dreamy glow effect
+  vec3 glowScaled = glow.rgb * u_intensity;
+  vec3 result = 1.0 - (1.0 - original.rgb) * (1.0 - glowScaled);
+
+  fragColor = vec4(result, original.a);
+}
+`;
+
+// ─── Orton Effect Shader ─────────────────────────────────────────────────────
+
+// Orton Sandwich: blend post-FX result with sharp original frame
+// This is the FINAL pass in the chain, combining soft FX with crisp detail
+export const ORTON_SANDWICH_SHADER = `#version 300 es
+precision highp float;
+
+in vec2 v_texCoord;
+out vec4 fragColor;
+
+uniform sampler2D u_fxResult;    // Post-FX output (bloom, halation, soft glow, etc.)
+uniform sampler2D u_baseFrame;   // Original sharp frame
+uniform float u_blendOpacity;    // How much of the sharp original to blend (0-1)
+uniform int u_blendMode;         // 0=screen, 1=softLight, 2=average
+
+// Screen blend: 1 - (1 - a) * (1 - b)
+vec3 blendScreen(vec3 base, vec3 blend) {
+  return 1.0 - (1.0 - base) * (1.0 - blend);
+}
+
+// Soft light blend: complex formula for subtle, natural blending
+vec3 blendSoftLight(vec3 base, vec3 blend) {
+  vec3 result;
+  for (int i = 0; i < 3; i++) {
+    float b = base[i];
+    float s = blend[i];
+    if (s <= 0.5) {
+      result[i] = b - (1.0 - 2.0 * s) * b * (1.0 - b);
+    } else {
+      float d = (b <= 0.25) ? ((16.0 * b - 12.0) * b + 4.0) * b : sqrt(b);
+      result[i] = b + (2.0 * s - 1.0) * (d - b);
+    }
+  }
+  return result;
+}
+
+// Average blend: simple 50/50 mix
+vec3 blendAverage(vec3 base, vec3 blend) {
+  return (base + blend) * 0.5;
+}
+
+void main() {
+  vec4 fxResult = texture(u_fxResult, v_texCoord);
+  vec4 baseFrame = texture(u_baseFrame, v_texCoord);
+
+  // Blend sharp original into the FX result
+  vec3 blended;
+  if (u_blendMode == 0) {
+    // Screen: brightens, good for glowy effect
+    blended = blendScreen(fxResult.rgb, baseFrame.rgb * u_blendOpacity);
+  } else if (u_blendMode == 1) {
+    // Soft Light: subtle, natural blend
+    blended = blendSoftLight(fxResult.rgb, baseFrame.rgb);
+    blended = mix(fxResult.rgb, blended, u_blendOpacity);
+  } else {
+    // Average: direct 50/50 mix, controlled by opacity
+    blended = mix(fxResult.rgb, blendAverage(fxResult.rgb, baseFrame.rgb), u_blendOpacity);
+  }
+
+  fragColor = vec4(blended, fxResult.a);
+}
+`;
