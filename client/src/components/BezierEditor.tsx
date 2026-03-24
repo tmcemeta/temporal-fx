@@ -1,6 +1,6 @@
 // TEMPORAL FX — BezierEditor Component
 // "Cinematic Void" design: oscilloscope-style dark canvas, teal curve, draggable handles.
-// P0=(0,0) and P3=(1,1) are fixed. User drags P1 and P2.
+// All four control points (P0, P1, P2, P3) are draggable.
 
 import React, { useRef, useEffect, useCallback, useState } from "react";
 import type { BezierCurve } from "@/lib/types";
@@ -16,11 +16,14 @@ interface Props {
 }
 
 const HANDLE_RADIUS = 6;
+const ENDPOINT_RADIUS = 5;
 const TEAL = "#4ecdc4";
 const TEAL_DIM = "rgba(78,205,196,0.3)";
 const TEAL_GLOW = "rgba(78,205,196,0.15)";
 const GRID = "rgba(255,255,255,0.04)";
 const BG = "#0a0a0a";
+
+type HandleId = "p0" | "p1" | "p2" | "p3";
 
 export default function BezierEditor({
   value,
@@ -31,8 +34,8 @@ export default function BezierEditor({
   yLabel,
 }: Props) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const dragging = useRef<"p1" | "p2" | null>(null);
-  const [hovered, setHovered] = useState<"p1" | "p2" | null>(null);
+  const dragging = useRef<HandleId | null>(null);
+  const [hovered, setHovered] = useState<HandleId | null>(null);
 
   const pad = 12;
   const innerW = width - pad * 2;
@@ -73,10 +76,10 @@ export default function BezierEditor({
     ctx.lineWidth = 1;
     ctx.strokeRect(pad, pad, innerW, innerH);
 
-    const p0 = toCanvas(0, 0);
+    const p0 = toCanvas(value.p0x, value.p0y);
     const p1 = toCanvas(value.p1x, value.p1y);
     const p2 = toCanvas(value.p2x, value.p2y);
-    const p3 = toCanvas(1, 1);
+    const p3 = toCanvas(value.p3x, value.p3y);
 
     // Control lines
     ctx.strokeStyle = TEAL_DIM;
@@ -94,39 +97,54 @@ export default function BezierEditor({
     ctx.beginPath();
     for (let i = 0; i <= 80; i++) {
       const t = i / 80;
-      const y = evaluateBezier(value, t);
-      const cp = toCanvas(t, y);
+      const x = value.p0x + t * (value.p3x - value.p0x);
+      const y = evaluateBezier(value, x);
+      const cp = toCanvas(x, y);
       if (i === 0) ctx.moveTo(cp.x, cp.y);
       else ctx.lineTo(cp.x, cp.y);
     }
     ctx.stroke();
     ctx.shadowBlur = 0;
 
-    // Fixed endpoints
-    ctx.fillStyle = "rgba(255,255,255,0.3)";
-    ctx.beginPath(); ctx.arc(p0.x, p0.y, 3, 0, Math.PI * 2); ctx.fill();
-    ctx.beginPath(); ctx.arc(p3.x, p3.y, 3, 0, Math.PI * 2); ctx.fill();
+    // Draggable handles helper
+    const drawHandle = (pt: { x: number; y: number }, id: HandleId, isEndpoint: boolean) => {
+      const isHovered = hovered === id;
+      const isDragging = dragging.current === id;
+      const radius = isEndpoint ? ENDPOINT_RADIUS : HANDLE_RADIUS;
 
-    // Draggable handles
-    const drawHandle = (pt: { x: number; y: number }, isHovered: boolean, isDragging: boolean) => {
       ctx.beginPath();
-      ctx.arc(pt.x, pt.y, HANDLE_RADIUS, 0, Math.PI * 2);
-      ctx.fillStyle = isDragging ? TEAL : isHovered ? "rgba(78,205,196,0.8)" : "rgba(78,205,196,0.4)";
-      ctx.fill();
-      ctx.strokeStyle = TEAL;
-      ctx.lineWidth = 1.5;
-      ctx.stroke();
+      ctx.arc(pt.x, pt.y, radius, 0, Math.PI * 2);
+
+      if (isEndpoint) {
+        // Endpoints: different style (hollow when not active)
+        ctx.fillStyle = isDragging ? TEAL : isHovered ? "rgba(78,205,196,0.6)" : "rgba(78,205,196,0.25)";
+        ctx.fill();
+        ctx.strokeStyle = isDragging || isHovered ? TEAL : "rgba(78,205,196,0.5)";
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
+      } else {
+        // Control points: solid style
+        ctx.fillStyle = isDragging ? TEAL : isHovered ? "rgba(78,205,196,0.8)" : "rgba(78,205,196,0.4)";
+        ctx.fill();
+        ctx.strokeStyle = TEAL;
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
+      }
+
       if (isDragging || isHovered) {
         ctx.beginPath();
-        ctx.arc(pt.x, pt.y, HANDLE_RADIUS + 3, 0, Math.PI * 2);
+        ctx.arc(pt.x, pt.y, radius + 3, 0, Math.PI * 2);
         ctx.strokeStyle = TEAL_GLOW;
         ctx.lineWidth = 1;
         ctx.stroke();
       }
     };
 
-    drawHandle(p1, hovered === "p1", dragging.current === "p1");
-    drawHandle(p2, hovered === "p2", dragging.current === "p2");
+    // Draw all four handles
+    drawHandle(p0, "p0", true);
+    drawHandle(p1, "p1", false);
+    drawHandle(p2, "p2", false);
+    drawHandle(p3, "p3", true);
 
     // Labels
     if (xLabel || yLabel) {
@@ -145,13 +163,21 @@ export default function BezierEditor({
 
   useEffect(() => { draw(); }, [draw]);
 
-  const getHitHandle = (cx: number, cy: number): "p1" | "p2" | null => {
+  const getHitHandle = (cx: number, cy: number): HandleId | null => {
+    const p0 = toCanvas(value.p0x, value.p0y);
     const p1 = toCanvas(value.p1x, value.p1y);
     const p2 = toCanvas(value.p2x, value.p2y);
+    const p3 = toCanvas(value.p3x, value.p3y);
+
     const dist = (a: { x: number; y: number }, bx: number, by: number) =>
       Math.sqrt((a.x - bx) ** 2 + (a.y - by) ** 2);
+
+    // Check control points first (they have priority)
     if (dist(p1, cx, cy) <= HANDLE_RADIUS + 4) return "p1";
     if (dist(p2, cx, cy) <= HANDLE_RADIUS + 4) return "p2";
+    // Then check endpoints
+    if (dist(p0, cx, cy) <= ENDPOINT_RADIUS + 4) return "p0";
+    if (dist(p3, cx, cy) <= ENDPOINT_RADIUS + 4) return "p3";
     return null;
   };
 
@@ -185,10 +211,20 @@ export default function BezierEditor({
     const { cx, cy } = getPos(e);
     if (dragging.current) {
       const { nx, ny } = toNorm(cx, cy);
-      if (dragging.current === "p1") {
+      const handle = dragging.current;
+
+      if (handle === "p0") {
+        // Constrain p0x to be less than p3x
+        const constrainedX = Math.min(nx, value.p3x - 0.01);
+        onChange({ ...value, p0x: constrainedX, p0y: ny });
+      } else if (handle === "p1") {
         onChange({ ...value, p1x: nx, p1y: ny });
-      } else {
+      } else if (handle === "p2") {
         onChange({ ...value, p2x: nx, p2y: ny });
+      } else if (handle === "p3") {
+        // Constrain p3x to be greater than p0x
+        const constrainedX = Math.max(nx, value.p0x + 0.01);
+        onChange({ ...value, p3x: constrainedX, p3y: ny });
       }
     } else {
       setHovered(getHitHandle(cx, cy));
@@ -198,8 +234,8 @@ export default function BezierEditor({
   const onMouseUp = () => { dragging.current = null; };
 
   const onDoubleClick = () => {
-    // Reset to linear diagonal
-    onChange({ p1x: 0.33, p1y: 0.33, p2x: 0.67, p2y: 0.67 });
+    // Reset to linear diagonal with default endpoints
+    onChange({ p0x: 0, p0y: 0, p1x: 0.33, p1y: 0.33, p2x: 0.67, p2y: 0.67, p3x: 1, p3y: 1 });
   };
 
   return (

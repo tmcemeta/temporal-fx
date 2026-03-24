@@ -22,8 +22,39 @@ export default function Home() {
 
   const videoInputRef = useRef<HTMLInputElement>(null);
 
-  const handleStateChange = useCallback((patch: Partial<FXState>) => {
-    setState(prev => ({ ...prev, ...patch }));
+const handleStateChange = useCallback((patch: Partial<FXState>) => {
+    setState(prev => {
+      const next = { ...prev, ...patch };
+      // Migration guard: ensure postFX exists with defaults
+      if (!next.postFX) {
+        next.postFX = DEFAULT_STATE.postFX;
+      }
+      // Migration guard: ensure halation exists with defaults (for old JSON files)
+      if (!next.postFX.halation) {
+        next.postFX = {
+          ...next.postFX,
+          halation: DEFAULT_STATE.postFX.halation,
+        };
+      }
+      // Migration guard: ensure bezier curves have all 4 control points (for old JSON files)
+      if (next.historyCurve && next.historyCurve.p0x === undefined) {
+        next.historyCurve = {
+          p0x: 0, p0y: 0,
+          p1x: next.historyCurve.p1x, p1y: next.historyCurve.p1y,
+          p2x: next.historyCurve.p2x, p2y: next.historyCurve.p2y,
+          p3x: 1, p3y: 1,
+        };
+      }
+      if (next.pixelWeightCurve && next.pixelWeightCurve.p0x === undefined) {
+        next.pixelWeightCurve = {
+          p0x: 0, p0y: 0,
+          p1x: next.pixelWeightCurve.p1x, p1y: next.pixelWeightCurve.p1y,
+          p2x: next.pixelWeightCurve.p2x, p2y: next.pixelWeightCurve.p2y,
+          p3x: 1, p3y: 1,
+        };
+      }
+      return next;
+    });
   }, []);
 
   const handleLoadVideo = () => videoInputRef.current?.click();

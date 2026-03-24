@@ -286,3 +286,254 @@ void main() {
   fragColor = texture(u_texture, v_texCoord);
 }
 `;
+
+// ─── Post-Processing Shaders ─────────────────────────────────────────────────
+
+// Bright pass: extract pixels above luminance threshold
+// Rendered at half resolution for efficiency (viewport controls this)
+export const BRIGHT_PASS_SHADER = `#version 300 es
+precision highp float;
+
+in vec2 v_texCoord;
+out vec4 fragColor;
+
+uniform sampler2D u_source;
+uniform float u_threshold;
+
+float getLuma(vec3 c) {
+  return dot(c, vec3(0.2126, 0.7152, 0.0722));
+}
+
+void main() {
+  vec4 color = texture(u_source, v_texCoord);
+  float luma = getLuma(color.rgb);
+
+  // Soft threshold with smooth falloff
+  float brightness = max(0.0, luma - u_threshold);
+  float contribution = brightness / (brightness + 1.0);
+
+  fragColor = vec4(color.rgb * contribution, color.a);
+}
+`;
+
+// Single-axis Gaussian blur (9-tap)
+// Direction: (1,0) for horizontal, (0,1) for vertical
+export const BLUR_SHADER = `#version 300 es
+precision highp float;
+
+in vec2 v_texCoord;
+out vec4 fragColor;
+
+uniform sampler2D u_source;
+uniform vec2 u_direction;  // (1,0) or (0,1) normalized
+uniform float u_radius;    // blur radius in pixels
+uniform vec2 u_texelSize;  // 1.0 / textureSize
+
+void main() {
+  // 9-tap Gaussian weights (sigma ~= radius/3)
+  const float weights[5] = float[5](
+    0.227027, 0.1945946, 0.1216216, 0.054054, 0.016216
+  );
+
+  vec2 offset = u_direction * u_texelSize * u_radius * 0.25;
+
+  vec4 result = texture(u_source, v_texCoord) * weights[0];
+
+  for (int i = 1; i < 5; i++) {
+    vec2 off = offset * float(i);
+    result += texture(u_source, v_texCoord + off) * weights[i];
+    result += texture(u_source, v_texCoord - off) * weights[i];
+  }
+
+  fragColor = result;
+}
+`;
+
+// Bloom composite: additive blend of blurred bloom onto original
+export const BLOOM_COMPOSITE_SHADER = `#version 300 es
+precision highp float;
+
+in vec2 v_texCoord;
+out vec4 fragColor;
+
+uniform sampler2D u_original;
+uniform sampler2D u_bloom;
+uniform float u_intensity;
+
+void main() {
+  vec4 original = texture(u_original, v_texCoord);
+  vec4 bloom = texture(u_bloom, v_texCoord);
+
+  // Additive blend with intensity control
+  vec3 result = original.rgb + bloom.rgb * u_intensity;
+
+  fragColor = vec4(result, original.a);
+}
+`;
+
+// ─── Halation Shaders ────────────────────────────────────────────────────────
+
+// Halation bright pass: extract bright pixels and tint toward warm color
+// Simulates light scattering through film emulsion layer
+export const HALATION_BRIGHT_PASS_SHADER = `#version 300 es
+precision highp float;
+
+in vec2 v_texCoord;
+out vec4 fragColor;
+
+uniform sampler2D u_source;
+uniform float u_threshold;
+uniform vec3 u_tint;
+uniform float u_tintStrength;
+
+float getLuma(vec3 c) {
+  return dot(c, vec3(0.2126, 0.7152, 0.0722));
+}
+
+void main() {
+  vec4 color = texture(u_source, v_texCoord);
+  float luma = getLuma(color.rgb);
+
+  // Soft threshold with smooth falloff
+  float brightness = max(0.0, luma - u_threshold);
+  float contribution = brightness / (brightness + 1.0);
+
+  // Tint the bright pixels toward the warm color
+  // Mix between original color and tint based on tintStrength
+  vec3 tinted = mix(color.rgb, u_tint * luma, u_tintStrength);
+
+  fragColor = vec4(tinted * contribution, color.a);
+}
+`;
+
+// Halation composite: screen blend for more natural film look
+export const HALATION_COMPOSITE_SHADER = `#version 300 es
+precision highp float;
+
+in vec2 v_texCoord;
+out vec4 fragColor;
+
+uniform sampler2D u_original;
+uniform sampler2D u_halation;
+uniform float u_intensity;
+
+void main() {
+  vec4 original = texture(u_original, v_texCoord);
+  vec4 halation = texture(u_halation, v_texCoord);
+
+  // Screen blend for more natural film look
+  // result = 1 - (1 - original) * (1 - halation * intensity)
+  vec3 halationScaled = halation.rgb * u_intensity;
+  vec3 result = 1.0 - (1.0 - original.rgb) * (1.0 - halationScaled);
+
+  fragColor = vec4(result, original.a);
+}
+`;
+
+// ─── Soft Glow Shaders ───────────────────────────────────────────────────────
+
+// Soft Glow exposure pass: boost brightness of full image (no threshold)
+export const SOFT_GLOW_EXPOSURE_SHADER = `#version 300 es
+precision highp float;
+
+in vec2 v_texCoord;
+out vec4 fragColor;
+
+uniform sampler2D u_source;
+uniform float u_exposure;
+
+void main() {
+  vec4 color = texture(u_source, v_texCoord);
+
+  // Apply exposure boost to all pixels (no luminance threshold)
+  vec3 result = color.rgb * u_exposure;
+
+  fragColor = vec4(result, color.a);
+}
+`;
+
+// Soft Glow composite: screen blend of blurred+exposed glow onto original
+export const SOFT_GLOW_COMPOSITE_SHADER = `#version 300 es
+precision highp float;
+
+in vec2 v_texCoord;
+out vec4 fragColor;
+
+uniform sampler2D u_original;
+uniform sampler2D u_softGlow;
+uniform float u_intensity;
+
+void main() {
+  vec4 original = texture(u_original, v_texCoord);
+  vec4 glow = texture(u_softGlow, v_texCoord);
+
+  // Screen blend for dreamy glow effect
+  vec3 glowScaled = glow.rgb * u_intensity;
+  vec3 result = 1.0 - (1.0 - original.rgb) * (1.0 - glowScaled);
+
+  fragColor = vec4(result, original.a);
+}
+`;
+
+// ─── Orton Effect Shader ─────────────────────────────────────────────────────
+
+// Orton Sandwich: blend post-FX result with sharp original frame
+// This is the FINAL pass in the chain, combining soft FX with crisp detail
+export const ORTON_SANDWICH_SHADER = `#version 300 es
+precision highp float;
+
+in vec2 v_texCoord;
+out vec4 fragColor;
+
+uniform sampler2D u_fxResult;    // Post-FX output (bloom, halation, soft glow, etc.)
+uniform sampler2D u_baseFrame;   // Original sharp frame
+uniform float u_blendOpacity;    // How much of the sharp original to blend (0-1)
+uniform int u_blendMode;         // 0=screen, 1=softLight, 2=average
+
+// Screen blend: 1 - (1 - a) * (1 - b)
+vec3 blendScreen(vec3 base, vec3 blend) {
+  return 1.0 - (1.0 - base) * (1.0 - blend);
+}
+
+// Soft light blend: complex formula for subtle, natural blending
+vec3 blendSoftLight(vec3 base, vec3 blend) {
+  vec3 result;
+  for (int i = 0; i < 3; i++) {
+    float b = base[i];
+    float s = blend[i];
+    if (s <= 0.5) {
+      result[i] = b - (1.0 - 2.0 * s) * b * (1.0 - b);
+    } else {
+      float d = (b <= 0.25) ? ((16.0 * b - 12.0) * b + 4.0) * b : sqrt(b);
+      result[i] = b + (2.0 * s - 1.0) * (d - b);
+    }
+  }
+  return result;
+}
+
+// Average blend: simple 50/50 mix
+vec3 blendAverage(vec3 base, vec3 blend) {
+  return (base + blend) * 0.5;
+}
+
+void main() {
+  vec4 fxResult = texture(u_fxResult, v_texCoord);
+  vec4 baseFrame = texture(u_baseFrame, v_texCoord);
+
+  // Blend sharp original into the FX result
+  vec3 blended;
+  if (u_blendMode == 0) {
+    // Screen: brightens, good for glowy effect
+    blended = blendScreen(fxResult.rgb, baseFrame.rgb * u_blendOpacity);
+  } else if (u_blendMode == 1) {
+    // Soft Light: subtle, natural blend
+    blended = blendSoftLight(fxResult.rgb, baseFrame.rgb);
+    blended = mix(fxResult.rgb, blended, u_blendOpacity);
+  } else {
+    // Average: direct 50/50 mix, controlled by opacity
+    blended = mix(fxResult.rgb, blendAverage(fxResult.rgb, baseFrame.rgb), u_blendOpacity);
+  }
+
+  fragColor = vec4(blended, fxResult.a);
+}
+`;
